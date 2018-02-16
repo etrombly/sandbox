@@ -15,8 +15,6 @@ extern crate gcode;
 use gcode::{Tokenizer, Parser};
 use gcode::parser::{Line, CommandKind};
 
-//use core::fmt::Write;
-
 use hal::prelude::*;
 use cortex_m::peripheral::syst::SystClkSource;
 use hal::stm32f103xx;
@@ -27,6 +25,7 @@ use stepper_driver::ic::ULN2003;
 use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
 use hal::gpio::{Output, PushPull};
 
+// TODO: have these initialized over the serial connection
 const GCODE: &'static str = "G0 X10 Y0\nG0 X10 Y10\nG0 X0 Y10\nG0 X0 Y0";
 const STEPS_MM: f32 = 120.0;
 const STEP_SIZE: f32 = 1.0 / STEPS_MM;
@@ -70,7 +69,7 @@ fn init(mut p: init::Peripherals) -> init::LateResources {
 
     let mut gpioa = p.device.GPIOA.split(&mut rcc.apb2);
 
-    // configure the system timer to generate one interrupt every second
+    // configure the system timer
     p.core.SYST.set_clock_source(SystClkSource::Core);
     p.core.SYST.set_reload(100_000); 
     p.core.SYST.enable_interrupt();
@@ -90,27 +89,23 @@ fn idle() -> ! {
 
 
 // This is the task handler of the SYS_TICK exception
-//
-// `_t` is the preemption threshold token. We won't use it in this program.
-//
-// `r` is the set of resources this task has access to. `SYS_TICK::Resources`
-// has one field per resource declared in `app!`.
 #[allow(unsafe_code)]
 fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
-    // add check if all current moves are done and grab next move from buffer
+    // TODO: add check if all current moves are done and grab next move from buffer
     if r.CURRENT.x > 0.0 {
         r.STEPPER_X.step();
         r.CURRENT.x -= STEP_SIZE;
     }
     
 
-    // This section should be in the serial handling section
+    // TODO: This section should be in the serial handling section
     let lexer = Tokenizer::new(GCODE.chars());
     let tokens = lexer.filter_map(|t| t.ok());
     let parser = Parser::new(tokens);
     for line in parser {
         if let Line::Cmd(command) = line.unwrap() {
             if (command.kind, command.number) == (CommandKind::G, gcode::parser::Number::Integer(0)) {
+                // TODO: these should add the command to the buffer, rather than current move
                 if let Some(x) = command.args.x {
                     r.CURRENT.x = x;
                 }
