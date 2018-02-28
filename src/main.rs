@@ -9,6 +9,7 @@ extern crate cortex_m;
 extern crate cortex_m_rtfm as rtfm;
 extern crate either;
 extern crate gcode;
+#[macro_use] 
 extern crate nb;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
@@ -20,7 +21,7 @@ use gcode::parser::{CommandKind, Line, Number};
 
 use either::Either;
 
-use stm32f103xx::USART1;
+use stm32f103xx::{USART1};
 
 use hal::prelude::*;
 use hal::stm32f103xx;
@@ -28,6 +29,7 @@ use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
 use hal::gpio::gpiob::{PB4, PB5, PB6, PB7};
 use hal::gpio::{Output, PushPull};
 use hal::serial::{Rx, Serial, Tx};
+use hal::timer::{Timer, Event};
 use hal::dma::{self, Transfer, dma1, R, W};
 
 use cortex_m::peripheral::syst::SystClkSource;
@@ -84,7 +86,9 @@ app! {
 
     resources: {
         static STEPPER_X: STEPPER_X;
+        static STEPPER_Y: STEPPER_Y;
         static CURRENT: Move;
+        static TIMER: Timer<stm32f103xx::TIM2>;
         static TX: Option<Either<(TX_BUF, dma1::C4, TX), Transfer<R, TX_BUF, dma1::C4, TX>>> = None;
         static RX_BUF: [u8; RX_SZ] = [0; RX_SZ];
         static RX: Option<Either<(RX_BUF, dma1::C5, RX), Transfer<W, RX_BUF, dma1::C5, RX>>> = None;
@@ -95,11 +99,16 @@ app! {
         resources: [RX_BUF, TX_BUF],
     },
 
-    // SYS_TICK handles stepper movement
+    // Timer 2 handles stepper movement
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [STEPPER_X, CURRENT, TX],
+            resources: [TIMER, TX],
+        },
+
+        TIM2: {
+            path: timer2,
+            resources: [STEPPER_X, STEPPER_Y, CURRENT, TIMER],
         },
 
         DMA1_CHANNEL5: {
@@ -119,10 +128,15 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
         .sysclk(64.mhz())
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
+    
+    
+    let mut tim2 = Timer::tim2(p.device.TIM2, 180.hz(), clocks, &mut rcc.apb1);
+    tim2.listen(Event::Update);
 
     let mut afio = p.device.AFIO.constrain(&mut rcc.apb2);
 
     let mut gpioa = p.device.GPIOA.split(&mut rcc.apb2);
+    let mut gpiob = p.device.GPIOB.split(&mut rcc.apb2);
     let mut channels = p.device.DMA1.split(&mut rcc.ahb);
 
     // SERIAL
@@ -162,9 +176,19 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
         gpioa.pa4.into_push_pull_output(&mut gpioa.crl),
     );
 
+    let stepper_y = Stepper::uln2003(
+        Direction::CW,
+        gpiob.pb4.into_push_pull_output(&mut gpiob.crl),
+        gpiob.pb5.into_push_pull_output(&mut gpiob.crl),
+        gpiob.pb6.into_push_pull_output(&mut gpiob.crl),
+        gpiob.pb7.into_push_pull_output(&mut gpiob.crl),
+    );
+
     init::LateResources {
         STEPPER_X: stepper_x,
+        STEPPER_Y: stepper_y,
         CURRENT: Move { x: 0.0, y: 0.0 },
+        TIMER: tim2,
     }
 }
 
@@ -174,14 +198,21 @@ fn idle() -> ! {
     }
 }
 
-// This is the task handler of the SYS_TICK exception
-#[allow(unsafe_code)]
-fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
+// This is the task handler of the TIM2 exception
+fn sys_tick(_t: &mut Threshold, _r: SYS_TICK::Resources) {
+    // TODO: Send heartbeat and any other responses back through serial
+
+    //TODO: calculate timer speeds based on accel and jerk settings
+}
+
+// This is the task handler of the TIM2 exception
+fn timer2(_t: &mut Threshold, mut r: TIM2::Resources) {
     // TODO: add check if all current moves are done and grab next move from buffer
-    if r.CURRENT.x > 0.0 {
+    //if r.CURRENT.x > 0.0 {
+        while let Err(_) = r.TIMER.wait() {}
         r.STEPPER_X.step();
         r.CURRENT.x -= X_STEP_SIZE;
-    }
+    //}
 }
 
 fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
