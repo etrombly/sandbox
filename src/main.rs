@@ -9,12 +9,15 @@ extern crate cortex_m;
 extern crate cortex_m_rtfm as rtfm;
 extern crate either;
 extern crate gcode;
-#[macro_use] 
 extern crate nb;
+extern crate byteorder;
+extern crate cobs;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
 
 use core::str;
+
+use byteorder::{ByteOrder, LE};
 
 use gcode::{Parser, Tokenizer};
 use gcode::parser::{CommandKind, Line, Number};
@@ -103,7 +106,7 @@ app! {
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [TIMER, TX],
+            resources: [TIMER, CURRENT],
         },
 
         TIM2: {
@@ -113,7 +116,7 @@ app! {
 
         DMA1_CHANNEL5: {
             path: rx,
-            resources: [RX, CURRENT],
+            resources: [RX, TX, CURRENT],
         }
     },
 }
@@ -199,7 +202,7 @@ fn idle() -> ! {
 }
 
 // This is the task handler of the TIM2 exception
-fn sys_tick(_t: &mut Threshold, _r: SYS_TICK::Resources) {
+fn sys_tick(_t: &mut Threshold, r: SYS_TICK::Resources) {
     // TODO: Send heartbeat and any other responses back through serial
 
     //TODO: calculate timer speeds based on accel and jerk settings
@@ -208,11 +211,15 @@ fn sys_tick(_t: &mut Threshold, _r: SYS_TICK::Resources) {
 // This is the task handler of the TIM2 exception
 fn timer2(_t: &mut Threshold, mut r: TIM2::Resources) {
     // TODO: add check if all current moves are done and grab next move from buffer
-    //if r.CURRENT.x > 0.0 {
-        while let Err(_) = r.TIMER.wait() {}
+    if r.CURRENT.x > 0.0 {
         r.STEPPER_X.step();
-        //r.CURRENT.x -= X_STEP_SIZE;
-    //}
+        r.CURRENT.x -= X_STEP_SIZE;
+    }
+    if r.CURRENT.y > 0.0 {
+        r.STEPPER_Y.step();
+        r.CURRENT.y -= Y_STEP_SIZE;
+    }
+    r.TIMER.wait().unwrap();
 }
 
 fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
@@ -242,4 +249,19 @@ fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
     }
 
     *r.RX = Some(Either::Right(rx.read_exact(c, buf)));
+
+    let (buf, c, tx) = match r.TX.take().unwrap() {
+        Either::Left((buf, c, tx)) => (buf, c, tx),
+        Either::Right(transfer) => transfer.wait(),
+    };
+
+    if r.CURRENT.y > 0.0 {
+        //let mut data = [0; TX_SZ - 2];
+        //LE::write_f32(&mut data[0..4], r.CURRENT.y);
+        let data = "moving\n".as_bytes();
+        cobs::encode(&data, buf);
+        *r.TX = Some(Either::Right(tx.write_all(c, buf)));
+    } else {
+        *r.TX = Some(Either::Left((buf, c, tx)));
+    }
 }
