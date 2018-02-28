@@ -211,11 +211,12 @@ fn timer2(_t: &mut Threshold, mut r: TIM2::Resources) {
     //if r.CURRENT.x > 0.0 {
         while let Err(_) = r.TIMER.wait() {}
         r.STEPPER_X.step();
-        r.CURRENT.x -= X_STEP_SIZE;
+        //r.CURRENT.x -= X_STEP_SIZE;
     //}
 }
 
 fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
+    //TODO: change this to take a string, or change from the dma interface to regular serial
     let (buf, c, rx) = match r.RX.take().unwrap() {
         Either::Left((buf, c, rx)) => (buf, c, rx),
         Either::Right(transfer) => transfer.wait(),
