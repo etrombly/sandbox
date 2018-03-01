@@ -211,18 +211,33 @@ fn sys_tick(_t: &mut Threshold, r: SYS_TICK::Resources) {
 // This is the task handler of the TIM2 exception
 fn timer2(_t: &mut Threshold, mut r: TIM2::Resources) {
     // TODO: add check if all current moves are done and grab next move from buffer
-    // TODO: handle CCW movement (-CURRENT values)
-    if r.CURRENT.x > 0.0 {
-        r.STEPPER_X.step();
-        r.CURRENT.x -= X_STEP_SIZE;
-    } else if r.CURRENT.x < X_STEP_SIZE {
+    // TODO: refactor this to remove duplication
+    if r.CURRENT.x - X_STEP_SIZE > 0.0 || r.CURRENT.x + X_STEP_SIZE < 0.0{
+        if r.CURRENT.x > 0.0 {
+            r.STEPPER_X.direction(Direction::CW);
+            r.STEPPER_X.step();
+            r.CURRENT.x -= X_STEP_SIZE;
+        } else if r.CURRENT.x < 0.0 {
+            r.STEPPER_X.direction(Direction::CW);
+            r.STEPPER_X.step();
+            r.CURRENT.x += X_STEP_SIZE;
+        }
+    } else {
         r.STEPPER_X.disable();
         r.CURRENT.x = 0.0;
     }
-    if r.CURRENT.y > 0.0 {
-        r.STEPPER_Y.step();
-        r.CURRENT.y -= Y_STEP_SIZE;
-    } else if r.CURRENT.y < Y_STEP_SIZE {
+
+    if r.CURRENT.y - Y_STEP_SIZE > 0.0 || r.CURRENT.y + Y_STEP_SIZE < 0.0{
+        if r.CURRENT.y > 0.0 {
+            r.STEPPER_Y.direction(Direction::CW);
+            r.STEPPER_Y.step();
+            r.CURRENT.y -= Y_STEP_SIZE;
+        } else if r.CURRENT.y < 0.0 {
+            r.STEPPER_Y.direction(Direction::CW);
+            r.STEPPER_Y.step();
+            r.CURRENT.y += Y_STEP_SIZE;
+        }
+    } else {
         r.STEPPER_Y.disable();
         r.CURRENT.y = 0.0;
     }
@@ -265,7 +280,7 @@ fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
     if r.CURRENT.y > 0.0 {
         //let mut data = [0; TX_SZ - 2];
         //LE::write_f32(&mut data[0..4], r.CURRENT.y);
-        let data = "moving\n".as_bytes();
+        let data = "moving\r\n".as_bytes();
         cobs::encode(&data, buf);
         *r.TX = Some(Either::Right(tx.write_all(c, buf)));
     } else {
