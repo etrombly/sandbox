@@ -29,7 +29,7 @@ use stm32f103xx::{USART1};
 use hal::prelude::*;
 use hal::stm32f103xx;
 use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
-use hal::gpio::gpiob::{PB4, PB5, PB6, PB7};
+use hal::gpio::gpiob::{PB5, PB6, PB7, PB8};
 use hal::gpio::{Output, PushPull};
 use hal::serial::{Rx, Serial, Tx};
 use hal::timer::{Timer, Event};
@@ -70,10 +70,10 @@ type STEPPER_X = Stepper<
 >;
 #[allow(non_camel_case_types)]
 type STEPPER_Y = Stepper<
-    PB4<Output<PushPull>>,
     PB5<Output<PushPull>>,
     PB6<Output<PushPull>>,
     PB7<Output<PushPull>>,
+    PB8<Output<PushPull>>,
     ULN2003,
 >;
 
@@ -181,10 +181,10 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
 
     let stepper_y = Stepper::uln2003(
         Direction::CW,
-        gpiob.pb4.into_push_pull_output(&mut gpiob.crl),
         gpiob.pb5.into_push_pull_output(&mut gpiob.crl),
         gpiob.pb6.into_push_pull_output(&mut gpiob.crl),
         gpiob.pb7.into_push_pull_output(&mut gpiob.crl),
+        gpiob.pb8.into_push_pull_output(&mut gpiob.crh),
     );
 
     init::LateResources {
@@ -211,13 +211,20 @@ fn sys_tick(_t: &mut Threshold, r: SYS_TICK::Resources) {
 // This is the task handler of the TIM2 exception
 fn timer2(_t: &mut Threshold, mut r: TIM2::Resources) {
     // TODO: add check if all current moves are done and grab next move from buffer
+    // TODO: handle CCW movement (-CURRENT values)
     if r.CURRENT.x > 0.0 {
         r.STEPPER_X.step();
         r.CURRENT.x -= X_STEP_SIZE;
+    } else if r.CURRENT.x < X_STEP_SIZE {
+        r.STEPPER_X.disable();
+        r.CURRENT.x = 0.0;
     }
     if r.CURRENT.y > 0.0 {
         r.STEPPER_Y.step();
         r.CURRENT.y -= Y_STEP_SIZE;
+    } else if r.CURRENT.y < Y_STEP_SIZE {
+        r.STEPPER_Y.disable();
+        r.CURRENT.y = 0.0;
     }
     r.TIMER.wait().unwrap();
 }
