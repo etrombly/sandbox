@@ -96,9 +96,9 @@ type STEPPER_Y = Stepper<
 >;
 
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
-/* May add these back in later if I bother with path planning
+const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
 
-const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
+/* May add these back in later if I bother with path planning
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
 const M92: (CommandKind, Number) = (CommandKind::M, Number::Integer(92)); // Set steps per mm (unimplemented)
 const M114: (CommandKind, Number) = (CommandKind::M, Number::Integer(114)); // get current position (unimplemented)
@@ -150,7 +150,7 @@ app! {
 
         USART1: {
             path: rx,
-            resources: [RX, TX, MOVE_BUFFER, RX_BUF],
+            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF],
         }
     },
 }
@@ -348,6 +348,11 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                             // TODO: probably should handle G1 the same
                             if (command.kind, command.number) == G0 {
                                 while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+                            }
+                            else if (command.kind, command.number) == M0 {
+                                while let Some(_) = r.MOVE_BUFFER.dequeue() {}
+                                r.CURRENT.x = None;
+                                r.CURRENT.y = None;
                             }
                         }
                     }
