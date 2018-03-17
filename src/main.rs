@@ -3,16 +3,14 @@
 #![deny(unsafe_code)]
 //#![deny(warnings)]
 #![feature(proc_macro)]
+#![feature(const_fn)]
 #![no_std]
 
 extern crate cortex_m;
 extern crate cortex_m_rtfm as rtfm;
-extern crate either;
 extern crate gcode;
+#[macro_use(block)]
 extern crate nb;
-extern crate m;
-extern crate byteorder;
-extern crate cobs;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
 extern crate heapless;
@@ -22,11 +20,7 @@ use core::str;
 use gcode::{Parser, Tokenizer};
 use gcode::parser::{CommandKind, Line, Number};
 
-use either::Either;
-
 use heapless::RingBuffer;
-
-use stm32f103xx::{USART1};
 
 use hal::prelude::*;
 use hal::stm32f103xx;
@@ -35,7 +29,6 @@ use hal::gpio::gpiob::{PB5, PB6, PB7, PB8};
 use hal::gpio::{Output, PushPull};
 use hal::serial::{Rx, Serial, Tx};
 use hal::timer::{Timer, Event};
-use hal::dma::{self, Transfer, dma1, R, W};
 
 use cortex_m::peripheral::syst::SystClkSource;
 
@@ -43,6 +36,8 @@ use rtfm::{app, Threshold};
 
 use stepper_driver::{Direction, Stepper};
 use stepper_driver::ic::ULN2003;
+
+const LINE_ENDING: u8 = 13;
 
 // TODO: have these initialized over the serial connection and save to flash
 const X_STEPS_MM: f32 = 600.0;
@@ -52,16 +47,36 @@ const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max speed in mm/s
 const MAX_SPEED: f32 = 0.6;
 
-const TX_SZ: usize = 18;
-const RX_SZ: usize = 20;
+// max characters allowed in a line of gcode
+const RX_SZ: usize = 256;
 
 // CONNECTIONS
-type TX = Tx<USART1>;
-type RX = Rx<USART1>;
-#[allow(non_camel_case_types)]
-type TX_BUF = &'static mut [u8; TX_SZ];
-#[allow(non_camel_case_types)]
-type RX_BUF = &'static mut [u8; RX_SZ];
+type TX = Tx<stm32f103xx::USART1>;
+type RX = Rx<stm32f103xx::USART1>;
+
+pub struct Buffer {
+    index: usize,
+    buffer: [u8; RX_SZ]
+}
+
+impl Buffer {
+    const fn new() -> Buffer {
+        Buffer{index:0, buffer:[0; RX_SZ]}
+    }
+
+    pub fn insert(&mut self, data: &u8) -> Result<(), ()>{
+        if self.index < RX_SZ {
+            self.buffer[self.index] = *data;
+            self.index += 1;
+            return Ok(())
+        }
+        Err(())
+    }
+
+    pub fn clear(&mut self) {
+        self.index = 0;
+    }
+}
 
 #[allow(non_camel_case_types)]
 type STEPPER_X = Stepper<
@@ -111,15 +126,10 @@ app! {
         static CURRENT: Move;
         static TIMER_X: Timer<stm32f103xx::TIM2>;
         static TIMER_Y: Timer<stm32f103xx::TIM3>;
-        static TX: Option<Either<(TX_BUF, dma1::C4, TX), Transfer<R, TX_BUF, dma1::C4, TX>>> = None;
-        static RX_BUF: [u8; RX_SZ] = [0; RX_SZ];
-        static RX: Option<Either<(RX_BUF, dma1::C5, RX), Transfer<W, RX_BUF, dma1::C5, RX>>> = None;
-        static TX_BUF: [u8; TX_SZ] = [0; TX_SZ];
-        static MOVE_BUFFER: RingBuffer<Move, [Move; 5]> = RingBuffer::new();
-    },
-
-    init: {
-        resources: [RX_BUF, TX_BUF],
+        static TX: TX;
+        static RX_BUF: Buffer = Buffer::new();
+        static RX: RX;
+        static MOVE_BUFFER: RingBuffer<Move, [Move; 20]> = RingBuffer::new();
     },
 
     tasks: {
@@ -138,14 +148,14 @@ app! {
             resources: [STEPPER_Y, CURRENT, TIMER_Y],
         },
 
-        DMA1_CHANNEL5: {
+        USART1: {
             path: rx,
-            resources: [RX, MOVE_BUFFER],
+            resources: [RX, TX, MOVE_BUFFER, RX_BUF],
         }
     },
 }
 
-fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
+fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     p.core.DWT.enable_cycle_counter();
 
     let mut flash = p.device.FLASH.constrain();
@@ -167,13 +177,12 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
 
     let mut gpioa = p.device.GPIOA.split(&mut rcc.apb2);
     let mut gpiob = p.device.GPIOB.split(&mut rcc.apb2);
-    let mut channels = p.device.DMA1.split(&mut rcc.ahb);
 
     // SERIAL
     let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
     let pa10 = gpioa.pa10;
 
-    let serial = Serial::usart1(
+    let mut serial = Serial::usart1(
         p.device.USART1,
         (pa9, pa10),
         &mut afio.mapr,
@@ -182,16 +191,10 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
         &mut rcc.apb2,
     );
 
+    // Enable RX interrupt
+    serial.listen(hal::serial::Event::Rxne);
+
     let (mut tx, rx) = serial.split();
-
-    // just to show it's initialized
-    // TODO: add better output
-    tx.write("i".as_bytes()[0]);
-
-    *r.TX = Some(Either::Left((r.TX_BUF, channels.4, tx)));
-
-    channels.5.listen(dma::Event::TransferComplete);
-    *r.RX = Some(Either::Right(rx.read_exact(channels.5, r.RX_BUF)));
 
     // configure the system timer
     // TODO: test performance and see what this needs to actually be set to
@@ -216,12 +219,18 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
         gpiob.pb8.into_push_pull_output(&mut gpiob.crh),
     );
 
+    for c in "initialized\r\n".as_bytes() {
+        block!(tx.write(*c)).ok();
+    }
+
     init::LateResources {
         STEPPER_X: stepper_x,
         STEPPER_Y: stepper_y,
         CURRENT: Move { x: None, y: None },
         TIMER_X: tim2,
         TIMER_Y: tim3,
+        RX: rx,
+        TX: tx,
     }
 }
 
@@ -231,15 +240,8 @@ fn idle() -> ! {
     }
 }
 
-// This is the task handler of the TIM2 exception
+// Sys_tick mainly handles the movement buffer, not using any path planning since the steppers are slow
 fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
-    // TODO: Send heartbeat and any other responses back through serial
-    // terminate the last DMA transfer
-    //let (buf, c, mut tx) = match r.TX.take().unwrap() {
-    //    Either::Left((buf, c, tx)) => (buf, c, tx),
-    //    Either::Right(trans) => trans.wait(),
-    //};
-
     // check if current move is done
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
         // if it is try to grab a move off the buffer
@@ -300,10 +302,9 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
             }
         }
     }
-    //*r.TX = Some(Either::Left((buf, c, tx)));
 }
 
-// This is the task handler of the TIM2 exception
+// Handle movement for the X axis stepper
 fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
     if let Some(x) = r.CURRENT.x {
         if x > 0.0 {
@@ -318,7 +319,7 @@ fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
     r.TIMER_X.wait().unwrap();
 }
 
-// This is the task handler of the TIM3 exception
+// Handle movement for the Y axis stepper
 fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
     if let Some(y) = r.CURRENT.y {
         if y > 0.0 {
@@ -333,27 +334,50 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
     r.TIMER_Y.wait().unwrap();
 }
 
-fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
-    //TODO: find a good buffer size, see about idle line detection
-    let (buf, c, rx) = match r.RX.take().unwrap() {
-        Either::Left((buf, c, rx)) => (buf, c, rx),
-        Either::Right(transfer) => transfer.wait(),
-    };
-
-    if let Ok(gcode) = str::from_utf8(buf) {
-        let lexer = Tokenizer::new(gcode.chars());
-        // TODO: add error handling here
-        let tokens = lexer.filter_map(|t| t.ok());
-        let parser = Parser::new(tokens);
-        for line in parser {
-            if let Line::Cmd(command) = line.unwrap() {
-                // TODO: probably should handle G1 the same
-                if (command.kind, command.number) == G0 {
-                    while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
+    match r.RX.read() {
+        Ok(c) => {
+            if c == LINE_ENDING {
+                if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
+                    let lexer = Tokenizer::new(gcode.chars());
+                    // TODO: add error handling here
+                    let tokens = lexer.filter_map(|t| t.ok());
+                    let parser = Parser::new(tokens);
+                    for line in parser {
+                        if let Ok(Line::Cmd(command)) = line {
+                            // TODO: probably should handle G1 the same
+                            if (command.kind, command.number) == G0 {
+                                while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+                            }
+                        }
+                    }
+                }
+                r.RX_BUF.clear();
+            }
+            // Ignore buffer full errors for now
+            else if let Ok(_) = r.RX_BUF.insert(&c) {
+            }
+        },
+        Err(e) => {
+            // Don't really need this now, was debugging some errors previously
+            // will leave it in case though
+            match e {
+                nb::Error::WouldBlock => {
+                    for c in "blocking\r\n".as_bytes() {
+                        block!(r.TX.write(*c)).ok();
+                    }
+                },
+                nb::Error::Other(hal::serial::Error::Overrun) => {
+                    for c in "overrun error\r\n".as_bytes() {
+                        block!(r.TX.write(*c)).ok();
+                    }
+                }
+                _ => {
+                    for c in "other error\r\n".as_bytes() {
+                        block!(r.TX.write(*c)).ok();
+                    }
                 }
             }
         }
     }
-
-    *r.RX = Some(Either::Right(rx.read_exact(c, buf)));
 }

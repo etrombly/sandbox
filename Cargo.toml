@@ -15,6 +15,7 @@ cortex-m-rtfm = "0.3.1"
 nb = "0.1.1"
 m = "0.1.1"
 heapless = "0.2.4"
+numtoa = "0.0.7"
 
 [dependencies.byteorder]
 default-features = false
