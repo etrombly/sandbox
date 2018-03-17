@@ -1,8 +1,6 @@
-# `cortex-m-quickstart`
+# `sandbox`
 
-> A template for building applications for ARM Cortex-M microcontrollers
-
-# [Documentation](https://docs.rs/cortex-m-quickstart)
+> A zen garden sandbox. Will take a gcode drawing and sketch it in the sand.
 
 # License
 

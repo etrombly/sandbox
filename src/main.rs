@@ -49,7 +49,7 @@ const X_STEPS_MM: f32 = 600.0;
 const X_STEP_SIZE: f32 = 1.0 / X_STEPS_MM;
 const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
-// max velocity in mm/s
+// max speed in mm/s
 const MAX_SPEED: f32 = 0.6;
 
 const TX_SZ: usize = 18;
@@ -81,7 +81,8 @@ type STEPPER_Y = Stepper<
 >;
 
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
-/*
+/* May add these back in later if I bother with path planning
+
 const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
 const M92: (CommandKind, Number) = (CommandKind::M, Number::Integer(92)); // Set steps per mm (unimplemented)
@@ -150,11 +151,15 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
     let mut flash = p.device.FLASH.constrain();
     let mut rcc = p.device.RCC.constrain();
 
+    // TODO: test performance and see what this needs to actually be set to
     let clocks = rcc.cfgr
         .sysclk(64.mhz())
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
     
+    // These timers are used to control the step speed of the steppers
+    // the initial update freq doesn't matter since they won't start until a move is received
+    // just don't set to 0hz
     let tim2 = Timer::tim2(p.device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
     let tim3 = Timer::tim3(p.device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
@@ -179,9 +184,9 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
 
     let (mut tx, rx) = serial.split();
 
-    for character in "initializing\n".as_bytes() {
-        tx.write(*character);
-    }
+    // just to show it's initialized
+    // TODO: add better output
+    tx.write("i".as_bytes()[0]);
 
     *r.TX = Some(Either::Left((r.TX_BUF, channels.4, tx)));
 
@@ -189,6 +194,7 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
     *r.RX = Some(Either::Right(rx.read_exact(channels.5, r.RX_BUF)));
 
     // configure the system timer
+    // TODO: test performance and see what this needs to actually be set to
     p.core.SYST.set_clock_source(SystClkSource::Core);
     p.core.SYST.set_reload(100_000);
     p.core.SYST.enable_interrupt();
@@ -234,9 +240,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     //    Either::Right(trans) => trans.wait(),
     //};
 
+    // check if current move is done
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
+        // if it is try to grab a move off the buffer
         if let Some(new_move) = r.MOVE_BUFFER.dequeue() {
             match new_move.x {
+                // if there's an x movement set the direction and make the movement positive
                 Some(x) => {
                     if x > 0.0 {
                         r.STEPPER_X.direction(Direction::CW);
@@ -249,6 +258,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                 None => r.CURRENT.x = None,
             }
             match new_move.y {
+                // if there's an y movement set the direction and make the movement positive
                 Some(y) => {
                     if y > 0.0 {
                         r.STEPPER_Y.direction(Direction::CW);
@@ -261,6 +271,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                 None => r.CURRENT.y = None,
             }
             match (r.CURRENT.x, r.CURRENT.y) {
+                // calculate the stepper speeds
                 (Some(_x), None) => {
                     r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
                     r.TIMER_X.listen(Event::Update);
@@ -307,7 +318,7 @@ fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
     r.TIMER_X.wait().unwrap();
 }
 
-// This is the task handler of the TIM2 exception
+// This is the task handler of the TIM3 exception
 fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
     if let Some(y) = r.CURRENT.y {
         if y > 0.0 {
@@ -323,7 +334,7 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
 }
 
 fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
-    //TODO: change this to take a string, or change from the dma interface to regular serial
+    //TODO: find a good buffer size, see about idle line detection
     let (buf, c, rx) = match r.RX.take().unwrap() {
         Either::Left((buf, c, rx)) => (buf, c, rx),
         Either::Right(transfer) => transfer.wait(),
@@ -336,6 +347,7 @@ fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
         let parser = Parser::new(tokens);
         for line in parser {
             if let Line::Cmd(command) = line.unwrap() {
+                // TODO: probably should handle G1 the same
                 if (command.kind, command.number) == G0 {
                     while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
                 }
