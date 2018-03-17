@@ -256,8 +256,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                         r.STEPPER_X.direction(Direction::CCW);
                         r.CURRENT.x = Some(x * -1.0);
                     }
+                    r.TIMER_X.listen(Event::Update);
                 },
-                None => r.CURRENT.x = None,
+                None => {
+                    r.CURRENT.x = None;
+                    r.TIMER_X.unlisten(Event::Update);
+                },
             }
             match new_move.y {
                 // if there's an y movement set the direction and make the movement positive
@@ -269,20 +273,22 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                         r.STEPPER_Y.direction(Direction::CCW);
                         r.CURRENT.y = Some(y * -1.0);
                     }
+                    r.TIMER_Y.listen(Event::Update);
                 },
-                None => r.CURRENT.y = None,
+                None => {
+                    r.CURRENT.y = None;
+                    r.TIMER_Y.unlisten(Event::Update);
+                },
             }
+            
+            
             match (r.CURRENT.x, r.CURRENT.y) {
                 // calculate the stepper speeds
                 (Some(_x), None) => {
                     r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
-                    r.TIMER_X.listen(Event::Update);
-                    r.TIMER_Y.unlisten(Event::Update);
                 },
                 (None, Some(_y)) => {
-                    r.TIMER_X.unlisten(Event::Update);
                     r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
-                    r.TIMER_Y.listen(Event::Update);
                 },
                 (Some(x), Some(y)) => {
                     if x > y {
@@ -292,13 +298,8 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                         r.TIMER_X.start((((MAX_SPEED / X_STEP_SIZE) / (y / x)) as u32).hz());
                         r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
                     }
-                    r.TIMER_X.listen(Event::Update);
-                    r.TIMER_Y.listen(Event::Update);
-                }
-                _ => {
-                    r.TIMER_X.unlisten(Event::Update);
-                    r.TIMER_Y.unlisten(Event::Update);
-                }
+                },
+                _ => {}
             }
         }
     }
