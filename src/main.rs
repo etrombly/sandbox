@@ -15,17 +15,16 @@ extern crate byteorder;
 extern crate cobs;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
+extern crate heapless;
 
 use core::str;
-
-use byteorder::{ByteOrder, LE};
-
-use m::Float;
 
 use gcode::{Parser, Tokenizer};
 use gcode::parser::{CommandKind, Line, Number};
 
 use either::Either;
+
+use heapless::RingBuffer;
 
 use stm32f103xx::{USART1};
 
@@ -51,14 +50,7 @@ const X_STEP_SIZE: f32 = 1.0 / X_STEPS_MM;
 const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max velocity in mm/s
-const MAX_SPEED_X: f32 = 0.6;
-const MAX_SPEED_Y: f32 = 0.6;
-// min velocity
-const JERK_X: f32 = 0.3;
-const JERK_Y: f32 = 0.3;
-// acceleration
-const ACCEL_X: f32 = 1.0;
-const ACCEL_Y: f32 = 1.0;
+const MAX_SPEED: f32 = 0.6;
 
 const TX_SZ: usize = 18;
 const RX_SZ: usize = 20;
@@ -89,6 +81,7 @@ type STEPPER_Y = Stepper<
 >;
 
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
+/*
 const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
 const M92: (CommandKind, Number) = (CommandKind::M, Number::Integer(92)); // Set steps per mm (unimplemented)
@@ -101,10 +94,11 @@ const M222: (CommandKind, Number) = (CommandKind::M, Number::Integer(222)); // S
 const M223: (CommandKind, Number) = (CommandKind::M, Number::Integer(223)); // Set speed for fast Z Moves (unimplemented)
 const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // Save settings (unimplemented)
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
+*/
 
 pub struct Move {
-    pub x: f32,
-    pub y: f32,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
 }
 
 app! {
@@ -120,6 +114,7 @@ app! {
         static RX_BUF: [u8; RX_SZ] = [0; RX_SZ];
         static RX: Option<Either<(RX_BUF, dma1::C5, RX), Transfer<W, RX_BUF, dma1::C5, RX>>> = None;
         static TX_BUF: [u8; TX_SZ] = [0; TX_SZ];
+        static MOVE_BUFFER: RingBuffer<Move, [Move; 5]> = RingBuffer::new();
     },
 
     init: {
@@ -129,7 +124,7 @@ app! {
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [TIMER_X, TIMER_Y, CURRENT],
+            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y],
         },
 
         TIM2: {
@@ -144,7 +139,7 @@ app! {
 
         DMA1_CHANNEL5: {
             path: rx,
-            resources: [RX, TX, CURRENT],
+            resources: [RX, MOVE_BUFFER],
         }
     },
 }
@@ -160,11 +155,8 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
     
-    // TODO: start at 0 and calculate velocity in sys_tick
-    let mut tim2 = Timer::tim2(p.device.TIM2, ((MAX_SPEED_X / X_STEP_SIZE) as u32).hz(), clocks, &mut rcc.apb1);
-    tim2.listen(Event::Update);
-    let mut tim3 = Timer::tim3(p.device.TIM3, ((MAX_SPEED_Y / Y_STEP_SIZE) as u32).hz(), clocks, &mut rcc.apb1);
-    tim3.listen(Event::Update);
+    let tim2 = Timer::tim2(p.device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
+    let tim3 = Timer::tim3(p.device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
     let mut afio = p.device.AFIO.constrain(&mut rcc.apb2);
 
@@ -187,8 +179,9 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
 
     let (mut tx, rx) = serial.split();
 
-    // start of COBS frame
-    tx.write(0x00).ok().unwrap();
+    for character in "initializing\n".as_bytes() {
+        tx.write(*character);
+    }
 
     *r.TX = Some(Either::Left((r.TX_BUF, channels.4, tx)));
 
@@ -220,7 +213,7 @@ fn init(mut p: init::Peripherals, r: init::Resources) -> init::LateResources {
     init::LateResources {
         STEPPER_X: stepper_x,
         STEPPER_Y: stepper_y,
-        CURRENT: Move { x: 0.0, y: 0.0 },
+        CURRENT: Move { x: None, y: None },
         TIMER_X: tim2,
         TIMER_Y: tim3,
     }
@@ -233,54 +226,98 @@ fn idle() -> ! {
 }
 
 // This is the task handler of the TIM2 exception
-fn sys_tick(_t: &mut Threshold, r: SYS_TICK::Resources) {
+fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     // TODO: Send heartbeat and any other responses back through serial
+    // terminate the last DMA transfer
+    //let (buf, c, mut tx) = match r.TX.take().unwrap() {
+    //    Either::Left((buf, c, tx)) => (buf, c, tx),
+    //    Either::Right(trans) => trans.wait(),
+    //};
 
-    //TODO: calculate timer speeds based on accel and jerk settings
-    //r.X_TIMER.start((X_SPEED / X_STEP_SIZE).hz());
-
-    let distance = 10.0; //temp value for velocity calc, replace with r.CURRENT.x or whatever
-    let velocity_max_x = ((ACCEL_X * JERK_X * JERK_X) + (2.0 * (ACCEL_X * ACCEL_X * distance)) / (ACCEL_X * 2.0)).sqrt();
+    if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
+        if let Some(new_move) = r.MOVE_BUFFER.dequeue() {
+            match new_move.x {
+                Some(x) => {
+                    if x > 0.0 {
+                        r.STEPPER_X.direction(Direction::CW);
+                        r.CURRENT.x = Some(x);
+                    } else {
+                        r.STEPPER_X.direction(Direction::CCW);
+                        r.CURRENT.x = Some(x * -1.0);
+                    }
+                },
+                None => r.CURRENT.x = None,
+            }
+            match new_move.y {
+                Some(y) => {
+                    if y > 0.0 {
+                        r.STEPPER_Y.direction(Direction::CW);
+                        r.CURRENT.y = Some(y);
+                    } else {
+                        r.STEPPER_Y.direction(Direction::CCW);
+                        r.CURRENT.y = Some(y * -1.0);
+                    }
+                },
+                None => r.CURRENT.y = None,
+            }
+            match (r.CURRENT.x, r.CURRENT.y) {
+                (Some(_x), None) => {
+                    r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
+                    r.TIMER_X.listen(Event::Update);
+                    r.TIMER_Y.unlisten(Event::Update);
+                },
+                (None, Some(_y)) => {
+                    r.TIMER_X.unlisten(Event::Update);
+                    r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
+                    r.TIMER_Y.listen(Event::Update);
+                },
+                (Some(x), Some(y)) => {
+                    if x > y {
+                        r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
+                        r.TIMER_Y.start((((MAX_SPEED / Y_STEP_SIZE) / (x / y)) as u32).hz());
+                    } else {
+                        r.TIMER_X.start((((MAX_SPEED / X_STEP_SIZE) / (y / x)) as u32).hz());
+                        r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
+                    }
+                    r.TIMER_X.listen(Event::Update);
+                    r.TIMER_Y.listen(Event::Update);
+                }
+                _ => {
+                    r.TIMER_X.unlisten(Event::Update);
+                    r.TIMER_Y.unlisten(Event::Update);
+                }
+            }
+        }
+    }
+    //*r.TX = Some(Either::Left((buf, c, tx)));
 }
 
 // This is the task handler of the TIM2 exception
 fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
-    // TODO: add check if all current moves are done and grab next move from buffer
-    // TODO: refactor this to remove duplication
-    if r.CURRENT.x - X_STEP_SIZE > 0.0 || r.CURRENT.x + X_STEP_SIZE < 0.0{
-        if r.CURRENT.x > 0.0 {
-            r.STEPPER_X.direction(Direction::CW);
+    if let Some(x) = r.CURRENT.x {
+        if x > 0.0 {
             r.STEPPER_X.step();
-            r.CURRENT.x -= X_STEP_SIZE;
-        } else if r.CURRENT.x < 0.0 {
-            r.STEPPER_X.direction(Direction::CW);
-            r.STEPPER_X.step();
-            r.CURRENT.x += X_STEP_SIZE;
+            r.CURRENT.x = Some(x - X_STEP_SIZE);
+        } else {
+            r.CURRENT.x = None;
         }
     } else {
         r.STEPPER_X.disable();
-        r.CURRENT.x = 0.0;
     }
     r.TIMER_X.wait().unwrap();
 }
 
 // This is the task handler of the TIM2 exception
 fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
-    // TODO: add check if all current moves are done and grab next move from buffer
-    // TODO: refactor this to remove duplication
-    if r.CURRENT.y - Y_STEP_SIZE > 0.0 || r.CURRENT.y + Y_STEP_SIZE < 0.0{
-        if r.CURRENT.y > 0.0 {
-            r.STEPPER_Y.direction(Direction::CW);
+    if let Some(y) = r.CURRENT.y {
+        if y > 0.0 {
             r.STEPPER_Y.step();
-            r.CURRENT.y -= Y_STEP_SIZE;
-        } else if r.CURRENT.y < 0.0 {
-            r.STEPPER_Y.direction(Direction::CW);
-            r.STEPPER_Y.step();
-            r.CURRENT.y += Y_STEP_SIZE;
+            r.CURRENT.y = Some(y - Y_STEP_SIZE);
+        } else {
+            r.CURRENT.y = None;
         }
     } else {
         r.STEPPER_Y.disable();
-        r.CURRENT.y = 0.0;
     }
     r.TIMER_Y.wait().unwrap();
 }
@@ -294,38 +331,17 @@ fn rx(_t: &mut Threshold, mut r: DMA1_CHANNEL5::Resources) {
 
     if let Ok(gcode) = str::from_utf8(buf) {
         let lexer = Tokenizer::new(gcode.chars());
+        // TODO: add error handling here
         let tokens = lexer.filter_map(|t| t.ok());
         let parser = Parser::new(tokens);
         for line in parser {
             if let Line::Cmd(command) = line.unwrap() {
                 if (command.kind, command.number) == G0 {
-                    // TODO: these should add the command to the buffer, rather than current move
-                    if let Some(x) = command.args.x {
-                        r.CURRENT.x = x;
-                    }
-                    if let Some(y) = command.args.y {
-                        r.CURRENT.y = y;
-                    }
+                    while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
                 }
             }
         }
     }
 
     *r.RX = Some(Either::Right(rx.read_exact(c, buf)));
-
-    // TODO: take this out later
-    let (buf, c, tx) = match r.TX.take().unwrap() {
-        Either::Left((buf, c, tx)) => (buf, c, tx),
-        Either::Right(transfer) => transfer.wait(),
-    };
-
-    if r.CURRENT.y > 0.0 {
-        //let mut data = [0; TX_SZ - 2];
-        //LE::write_f32(&mut data[0..4], r.CURRENT.y);
-        let data = "moving\r\n".as_bytes();
-        cobs::encode(&data, buf);
-        *r.TX = Some(Either::Right(tx.write_all(c, buf)));
-    } else {
-        *r.TX = Some(Either::Left((buf, c, tx)));
-    }
 }
