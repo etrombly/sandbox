@@ -96,7 +96,7 @@ type STEPPER_Y = Stepper<
 >;
 
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
-const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
+const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
 
 /* May add these back in later if I bother with path planning
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
@@ -347,7 +347,8 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                         if let Ok(Line::Cmd(command)) = line {
                             // TODO: probably should handle G1 the same
                             if (command.kind, command.number) == G0 {
-                                while let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+                                // TODO: Handle the buffer being full
+                                if let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
                             }
                             else if (command.kind, command.number) == M0 {
                                 while let Some(_) = r.MOVE_BUFFER.dequeue() {}
