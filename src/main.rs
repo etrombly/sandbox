@@ -14,8 +14,11 @@ extern crate nb;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
 extern crate heapless;
+extern crate m;
 
 use core::str;
+
+use m::Float as _0;
 
 use gcode::{Parser, Tokenizer};
 use gcode::parser::{CommandKind, Line, Number};
@@ -96,6 +99,9 @@ type STEPPER_Y = Stepper<
 >;
 
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
+const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
+const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
+const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
 const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
 
 /* May add these back in later if I bother with path planning
@@ -112,9 +118,108 @@ const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // S
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
 */
 
+pub trait Square {
+    fn sqr(&self) -> f32;
+}
+
+impl Square for f32 {
+    fn sqr(&self) -> f32 {
+        self * self
+    }
+}
+
+pub fn clamp (min: f32, max: f32, value: f32) -> f32 {
+    if value < min {
+        min
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
 pub struct Move {
     pub x: Option<f32>,
     pub y: Option<f32>,
+}
+
+struct ArcMove {
+    end_x: f32,
+    end_y: f32,
+    center_x: f32,
+    center_y: f32,
+    curr_x: f32,
+    curr_y: f32,
+    radius: f32,
+}
+
+impl ArcMove {
+    pub fn new(curr_x: f32, curr_y: f32, end_x: f32, end_y: f32, i: f32, j: f32) -> ArcMove {
+        let center_x = curr_x + i;
+        let center_y = curr_y + j;
+        let radius = ((curr_x - center_x).sqr() + (curr_y - center_y).sqr()).sqrt();
+        ArcMove {end_x, 
+            end_y, 
+            center_x, 
+            center_y, 
+            curr_x, 
+            curr_y,
+            radius,
+        }
+    }
+    
+    pub fn step(&mut self) {
+            let (next_x, y_sign) = match (self.curr_x > self.center_x, self.curr_y > self.center_y,
+                                    self.curr_x == self.center_x, self.curr_y == self.center_y) {
+            // top right or top
+            (true, true, false, false) |
+            (false, true, true, false)=> {
+                (clamp(self.center_x - self.radius, 
+                self.center_x + self.radius, 
+                self.curr_x + X_STEP_SIZE),
+                1.0)
+            },
+            // bottom right or right
+            (true, false, false, false) |
+            (true, false, false, true)=> {
+                (clamp(self.center_x - self.radius, 
+                self.center_x + self.radius, 
+                self.curr_x - X_STEP_SIZE),
+                - 1.0)
+            },
+            // bottom left or bottom
+            (false, false, false, false) |
+            (false, false, true, false)=> {
+                (clamp(self.center_x - self.radius, 
+                self.center_x + self.radius, 
+                self.curr_x - X_STEP_SIZE),
+                -1.0)
+            },
+            // top left or left
+            (false, true, false, false) |
+            (false, false, false, true)=> {
+                (clamp(self.center_x - self.radius, 
+                self.center_x + self.radius, 
+                self.curr_x + X_STEP_SIZE),
+                1.0)
+            },
+            // not actually possible to reach here
+            _ => (0.0, 0.0),
+        };
+        let d = next_x.sqr() - (2.0 * self.center_x * next_x) + self.center_x.sqr() + self.center_y.sqr() - self.radius.sqr();
+        let D = self.center_y.sqr() - d;
+        let next_y = self.center_y + D.sqrt(); 
+        self.curr_x = next_x;
+        self.curr_y = next_y;
+    }
+    
+    pub fn finished(&self) -> bool {
+        if (self.curr_x - X_STEP_SIZE) < self.end_x &&
+           (self.curr_x + X_STEP_SIZE) > self.end_x {
+            return true
+        }
+        false
+    }
 }
 
 app! {
@@ -336,8 +441,10 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
 }
 
 fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
+    // Read each character from serial as it comes in
     match r.RX.read() {
         Ok(c) => {
+            // If it's a newline character parse the line
             if c == LINE_ENDING {
                 if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
                     let lexer = Tokenizer::new(gcode.chars());
@@ -347,9 +454,12 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                     for line in parser {
                         if let Ok(Line::Cmd(command)) = line {
                             // TODO: probably should handle G1 the same
-                            if (command.kind, command.number) == G0 {
+                            if (command.kind, command.number) == G0  || (command.kind, command.number) == G1 {
                                 // TODO: Handle the buffer being full
                                 if let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+                            }
+                            if (command.kind, command.number) == G2 {
+
                             }
                             else if (command.kind, command.number) == M0 {
                                 while let Some(_) = r.MOVE_BUFFER.dequeue() {}
@@ -361,7 +471,8 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                 }
                 r.RX_BUF.clear();
             }
-            // Ignore buffer full errors for now
+            // If it's not a newline add it to the input buffer
+            // TODO: Handle the buffer being full
             else if let Ok(_) = r.RX_BUF.insert(&c) {
             }
         },
