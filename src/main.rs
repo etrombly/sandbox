@@ -22,8 +22,6 @@ extern crate m;
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
 use core::str;
-// used for the performance monitor
-use cortex_m::peripheral::DWT;
 
 // some float math that's not in core 
 use m::Float as _0;
@@ -40,6 +38,7 @@ use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
 use hal::gpio::gpiob::{PB5, PB6, PB7, PB8};
 use hal::gpio::{Output, PushPull};
 use hal::serial::{Rx, Serial, Tx};
+use hal::time::{MonoTimer, Instant};
 use hal::timer::{Timer, Event};
 
 use cortex_m::peripheral::syst::SystClkSource;
@@ -117,7 +116,7 @@ const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
 const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
 const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
 const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
-const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop (unimplemented)
+const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop 
 
 /* May add these back in later if I bother with path planning
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
@@ -262,16 +261,19 @@ app! {
         static RX_BUF: Buffer = Buffer::new();
         static RX: RX;
         static MOVE_BUFFER: RingBuffer<Move, [Move; 20]> = RingBuffer::new();
+        static MONO: MonoTimer;
+        static LAST_UPDATE: Instant;
         static SLEEP: u32 = 0;
     },
 
     idle: {
-        resources: [SLEEP]
-    }, 
+        resources: [SLEEP, MONO]
+    },
+
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP],
+            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP, LAST_UPDATE, MONO],
         },
 
         TIM2: {
@@ -292,9 +294,6 @@ app! {
 }
 
 fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
-    // enable DWT cycle counter to monitor performance
-    p.core.DWT.enable_cycle_counter();
-
     let mut flash = p.device.FLASH.constrain();
     let mut rcc = p.device.RCC.constrain();
 
@@ -304,11 +303,25 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
     
+    // start timer for performance monnitoring
+    let mono = MonoTimer::new(p.core.DWT, clocks);
+
+    // configure the system timer
+    // TODO: test performance and see what this needs to actually be set to
+    p.core.SYST.set_clock_source(SystClkSource::Core);
+    p.core.SYST.set_reload(100_000);
+    p.core.SYST.enable_interrupt();
+    p.core.SYST.enable_counter();        
+    
     // These timers are used to control the step speed of the steppers
     // the initial update freq doesn't matter since they won't start until a move is received
     // just don't set to 0hz 
     let tim2 = Timer::tim2(p.device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
     let tim3 = Timer::tim3(p.device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
+
+    // set up timer 4 to send out performance data
+    let mut tim4 = Timer::tim4(p.device.TIM4, 1.hz(), clocks, &mut rcc.apb1);
+    tim4.listen(Event::Update);
 
     let mut afio = p.device.AFIO.constrain(&mut rcc.apb2);
 
@@ -332,13 +345,6 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     serial.listen(hal::serial::Event::Rxne);
 
     let (mut tx, rx) = serial.split();
-
-    // configure the system timer
-    // TODO: test performance and see what this needs to actually be set to
-    p.core.SYST.set_clock_source(SystClkSource::Core);
-    p.core.SYST.set_reload(100_000);
-    p.core.SYST.enable_interrupt();
-    p.core.SYST.enable_counter();
 
     let stepper_x = Stepper::uln2003(
         Direction::CW,
@@ -368,16 +374,17 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
         TIMER_Y: tim3,
         RX: rx,
         TX: tx,
+        MONO: mono,
+        LAST_UPDATE: mono.now(),
     }
 }
 
 fn idle(t: &mut Threshold, mut r: idle::Resources) -> ! {
     loop {
         rtfm::atomic(t, |t| {
-            let before = DWT::get_cycle_count();
+            let before = r.MONO.borrow(t).now();
             rtfm::wfi();
-            let after = DWT::get_cycle_count();
-            *r.SLEEP.borrow_mut(t) += after.wrapping_sub(before);
+            *r.SLEEP.borrow_mut(t) += before.elapsed();
         });
     }
 }
@@ -448,14 +455,19 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         }
     }
 
-    // write the cpu monitoring data out
-    let mut data = [0; 4];
-    let mut buf: [u8; 8] = [0;8];
-    LE::write_u32(&mut data[0..4], *r.SLEEP);
-    cobs::encode(&data, &mut buf);
-    //for byte in buf.iter() {
-    //    block!(r.TX.write(*byte)).ok();
-    //}
+    // send performance info every second
+    // TODO: change this from a snapshot usage to an average or something more useful
+    if r.LAST_UPDATE.elapsed() > 60_000_000 {
+        *r.LAST_UPDATE = r.MONO.now();
+        // write the cpu monitoring data out
+        let mut data = [0; 4];
+        let mut buf: [u8; 8] = [0;8];
+        LE::write_u32(&mut data[0..4], *r.SLEEP);
+        cobs::encode(&data, &mut buf);
+        for byte in buf.iter() {
+            block!(r.TX.write(*byte)).ok();
+        }
+    }
 }
 
 // Handle movement for the X axis stepper
@@ -502,9 +514,6 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
             // screen seems to not send a newline, so just check for either
             if c == CARRIAGE_RETURN || c == NEW_LINE {
                 if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
-                    for c in "newline\r\n".as_bytes() {
-                        block!(r.TX.write(*c)).ok();
-                    }
                     let lexer = Tokenizer::new(gcode.chars());
                     // TODO: add error handling here
                     let tokens = lexer.filter_map(|t| t.ok());
@@ -530,11 +539,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
             }
             // If it's not a newline add it to the input buffer
             // TODO: Handle the buffer being full
-            else if let Ok(_) = r.RX_BUF.insert(&c) {
-                // echo back the input
-                // TODO: remove this, just here for debugging
-                block!(r.TX.write(c)).ok();
-            } 
+            else if let Ok(_) = r.RX_BUF.insert(&c) {} 
         },
         Err(e) => {
             match e {
