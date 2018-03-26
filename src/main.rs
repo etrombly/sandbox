@@ -457,13 +457,14 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
 
     // send performance info every second
     // TODO: change this from a snapshot usage to an average or something more useful
-    if r.LAST_UPDATE.elapsed() > 60_000_000 {
+    if r.LAST_UPDATE.elapsed() > 64_000_000 {
         *r.LAST_UPDATE = r.MONO.now();
         // write the cpu monitoring data out
         let mut data = [0; 4];
-        let mut buf: [u8; 8] = [0;8];
-        LE::write_u32(&mut data[0..4], *r.SLEEP);
+        let mut buf: [u8; 5] = [0;5];
+        LE::write_u32(&mut data, *r.SLEEP);
         cobs::encode(&data, &mut buf);
+        *r.SLEEP = 0;
         for byte in buf.iter() {
             block!(r.TX.write(*byte)).ok();
         }
