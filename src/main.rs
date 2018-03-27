@@ -91,7 +91,7 @@ impl Buffer {
     }
 }
 
-// the first stepper is connect to a ULN2003 on pins PA1-4
+// the first stepper is connected to a ULN2003 on pins PA1-4
 #[allow(non_camel_case_types)]
 type STEPPER_X = Stepper<
     PA1<Output<PushPull>>,
@@ -101,7 +101,7 @@ type STEPPER_X = Stepper<
     ULN2003,
 >;
 
-// the second stepper is connect to a ULN2003 on pins PB5-8
+// the second stepper is connected to a ULN2003 on pins PB5-8
 #[allow(non_camel_case_types)]
 type STEPPER_Y = Stepper<
     PB5<Output<PushPull>>,
@@ -132,6 +132,8 @@ const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // S
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
 */
 
+
+// no power function in core, but I only need to square stuff so far
 pub trait Square {
     fn sqr(&self) -> f32;
 }
@@ -154,6 +156,7 @@ pub fn clamp (min: f32, max: f32, value: f32) -> f32 {
     }
 }
 
+// Linear movement
 pub struct Move {
     pub x: Option<f32>,
     pub y: Option<f32>,
@@ -161,7 +164,7 @@ pub struct Move {
 
 // Struct to handle a G2 or G3 command
 // TODO: current x and y should be in global state
-// TODO: change these to 2d points
+// TODO: change these to 2d points (maybe)
 // TODO: add direction (CW, CCW)
 struct ArcMove {
     end_x: f32,
@@ -319,10 +322,6 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     let tim2 = Timer::tim2(p.device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
     let tim3 = Timer::tim3(p.device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
-    // set up timer 4 to send out performance data
-    let mut tim4 = Timer::tim4(p.device.TIM4, 1.hz(), clocks, &mut rcc.apb1);
-    tim4.listen(Event::Update);
-
     let mut afio = p.device.AFIO.constrain(&mut rcc.apb2);
 
     let mut gpioa = p.device.GPIOA.split(&mut rcc.apb2);
@@ -362,6 +361,7 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
         gpiob.pb8.into_push_pull_output(&mut gpiob.crh),
     );
 
+    // TODO: look in to changing serial TX back to DMA
     for c in "initialized\r\n".as_bytes() {
         block!(tx.write(*c)).ok();
     }
@@ -434,7 +434,8 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
             
             
             match (r.CURRENT.x, r.CURRENT.y) {
-                // calculate the stepper speeds
+                // calculate the stepper speeds so that x and y movement end at the same time
+                // (linear interpolation)
                 (Some(_x), None) => {
                     r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
                 },
@@ -456,7 +457,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     }
 
     // send performance info every second
-    // TODO: change this from a snapshot usage to an average or something more useful
+    // TODO: figure out a good interval, 1 second may be too long to be useful
     if r.LAST_UPDATE.elapsed() > 64_000_000 {
         *r.LAST_UPDATE = r.MONO.now();
         // write the cpu monitoring data out
@@ -508,11 +509,12 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
 }
 
 // serial recieve interrupt, triggered when there is data in RX buffer on the device
+// not using DMA because it's easier to process one byte at a time
 fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
     // Read each character from serial as it comes in
     match r.RX.read() {
         Ok(c) => {
-            // screen seems to not send a newline, so just check for either
+            // different serial clients send different line endings, check for either 
             if c == CARRIAGE_RETURN || c == NEW_LINE {
                 if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
                     let lexer = Tokenizer::new(gcode.chars());
