@@ -156,8 +156,13 @@ pub fn clamp (min: f32, max: f32, value: f32) -> f32 {
     }
 }
 
+pub struct Point {
+    pub x: f32,
+    pub y: f32,
+}
+
 // Linear movement
-pub struct Move {
+pub struct LinearMove {
     pub x: Option<f32>,
     pub y: Option<f32>,
 }
@@ -166,13 +171,11 @@ pub struct Move {
 // TODO: current x and y should be in global state
 // TODO: change these to 2d points (maybe)
 // TODO: add direction (CW, CCW)
-struct ArcMove {
+pub struct ArcMove {
     end_x: f32,
     end_y: f32,
     center_x: f32,
     center_y: f32,
-    curr_x: f32,
-    curr_y: f32,
     radius: f32,
 }
 
@@ -185,24 +188,22 @@ impl ArcMove {
             end_y, 
             center_x, 
             center_y, 
-            curr_x, 
-            curr_y,
             radius,
         }
     }
     
     // roughly translated from a python example, this can probably be optimized better
-    pub fn step(&mut self) {
+    pub fn step(&mut self, curr_x: f32, curr_y: f32) -> LinearMove {
         // Figure out what quadrant we're in to know the next x and if y will be positive or negative
         // TODO: find a multiple of step size that works well for drawing line segments
-        let (next_x, y_sign) = match (self.curr_x > self.center_x, self.curr_y > self.center_y,
-                                      self.curr_x == self.center_x, self.curr_y == self.center_y) {
+        let (next_x, y_sign) = match (curr_x > self.center_x, curr_y > self.center_y,
+                                      curr_x == self.center_x, curr_y == self.center_y) {
             // top right or top
             (true, true, false, false) |
             (false, true, true, false)=> {
                 (clamp(self.center_x - self.radius, 
                 self.center_x + self.radius, 
-                self.curr_x + X_STEP_SIZE),
+                curr_x + X_STEP_SIZE * 5.0),
                 1.0)
             },
             // bottom right or right
@@ -210,7 +211,7 @@ impl ArcMove {
             (true, false, false, true)=> {
                 (clamp(self.center_x - self.radius, 
                 self.center_x + self.radius, 
-                self.curr_x - X_STEP_SIZE),
+                curr_x - X_STEP_SIZE * 5.0),
                 - 1.0)
             },
             // bottom left or bottom
@@ -218,7 +219,7 @@ impl ArcMove {
             (false, false, true, false)=> {
                 (clamp(self.center_x - self.radius, 
                 self.center_x + self.radius, 
-                self.curr_x - X_STEP_SIZE),
+                curr_x - X_STEP_SIZE * 5.0),
                 -1.0)
             },
             // top left or left
@@ -226,7 +227,7 @@ impl ArcMove {
             (false, false, false, true)=> {
                 (clamp(self.center_x - self.radius, 
                 self.center_x + self.radius, 
-                self.curr_x + X_STEP_SIZE),
+                curr_x + X_STEP_SIZE * 5.0),
                 1.0)
             },
             // not actually possible to reach here
@@ -236,19 +237,23 @@ impl ArcMove {
         let D = self.center_y.sqr() - d;
         let next_y = self.center_y + (D.sqrt() * y_sign);
         // TODO: change this to add a linear move to the active movement
-        self.curr_x = next_x;
-        self.curr_y = next_y;
+        LinearMove{x: Some(next_x), y: Some(next_y)}
     }
     
-    pub fn finished(&self) -> bool {
-        if (self.curr_x - X_STEP_SIZE) < self.end_x &&
-           (self.curr_x + X_STEP_SIZE) > self.end_x &&
-           (self.curr_y - X_STEP_SIZE) < self.end_y &&
-           (self.curr_y + X_STEP_SIZE) > self.end_y{
+    pub fn finished(&self, curr_x: f32, curr_y: f32) -> bool {
+        if (curr_x - X_STEP_SIZE) < self.end_x &&
+           (curr_x + X_STEP_SIZE) > self.end_x &&
+           (curr_y - X_STEP_SIZE) < self.end_y &&
+           (curr_y + X_STEP_SIZE) > self.end_y{
             return true
         }
         false
     }
+}
+
+pub enum Movement {
+    LinearMove(LinearMove),
+    ArcMove(ArcMove),
 }
 
 app! {
@@ -257,16 +262,17 @@ app! {
     resources: {
         static STEPPER_X: STEPPER_X;
         static STEPPER_Y: STEPPER_Y;
-        static CURRENT: Move;
+        static CURRENT: LinearMove;
         static TIMER_X: Timer<stm32f103xx::TIM2>;
         static TIMER_Y: Timer<stm32f103xx::TIM3>;
         static TX: TX;
         static RX_BUF: Buffer = Buffer::new();
         static RX: RX;
-        static MOVE_BUFFER: RingBuffer<Move, [Move; 20]> = RingBuffer::new();
+        static MOVE_BUFFER: RingBuffer<Movement, [Movement; 20]> = RingBuffer::new();
         static MONO: MonoTimer;
         static LAST_UPDATE: Instant;
         static SLEEP: u32 = 0;
+        static LOCATION: Point = Point{x: 0.0, y: 0.0};
     },
 
     idle: {
@@ -276,22 +282,22 @@ app! {
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP, LAST_UPDATE, MONO],
+            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP, LAST_UPDATE, MONO, LOCATION],
         },
 
         TIM2: {
             path: timer_x,
-            resources: [STEPPER_X, CURRENT, TIMER_X],
+            resources: [STEPPER_X, CURRENT, TIMER_X, LOCATION],
         },
 
         TIM3: {
             path: timer_y,
-            resources: [STEPPER_Y, CURRENT, TIMER_Y],
+            resources: [STEPPER_Y, CURRENT, TIMER_Y, LOCATION],
         },
 
         USART1: {
             path: rx,
-            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF],
+            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF, LOCATION],
         }
     },
 }
@@ -369,7 +375,7 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     init::LateResources {
         STEPPER_X: stepper_x,
         STEPPER_Y: stepper_y,
-        CURRENT: Move { x: None, y: None },
+        CURRENT: LinearMove { x: None, y: None },
         TIMER_X: tim2,
         TIMER_Y: tim3,
         RX: rx,
@@ -395,7 +401,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
         // if it is try to grab a move off the buffer
         if let Some(new_move) = r.MOVE_BUFFER.dequeue() {
-            match new_move.x {
+            let movement = match new_move {
+                Movement::ArcMove(mut x) => x.step(r.LOCATION.x, r.LOCATION.y),
+                Movement::LinearMove(x) => x,
+            };
+            
+            match movement.x {
                 // if there's an x movement set the direction and make the movement positive
                 Some(x) => {
                     if x > 0.0 {
@@ -413,7 +424,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                     r.TIMER_X.unlisten(Event::Update);
                 },
             }
-            match new_move.y {
+            match movement.y {
                 // if there's an y movement set the direction and make the movement positive
                 Some(y) => {
                     if y > 0.0 {
@@ -478,6 +489,10 @@ fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
         if x > 0.0 {
             r.STEPPER_X.step();
             r.CURRENT.x = Some(x - X_STEP_SIZE);
+            match r.STEPPER_X.direction {
+                Direction::CW => r.LOCATION.x += X_STEP_SIZE,
+                _ => r.LOCATION.x -= X_STEP_SIZE,
+            }
         } else {
             r.CURRENT.x = None;
         }
@@ -496,6 +511,10 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
         if y > 0.0 {
             r.STEPPER_Y.step();
             r.CURRENT.y = Some(y - Y_STEP_SIZE);
+            match r.STEPPER_Y.direction {
+                Direction::CW => r.LOCATION.y += Y_STEP_SIZE,
+                _ => r.LOCATION.y -= Y_STEP_SIZE,
+            }
         } else {
             r.CURRENT.y = None;
         }
@@ -525,10 +544,16 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                         if let Ok(Line::Cmd(command)) = line {
                             if (command.kind, command.number) == G0  || (command.kind, command.number) == G1 {
                                 // TODO: Handle the buffer being full
-                                if let Err(_) = r.MOVE_BUFFER.enqueue(Move{x: command.args.x, y: command.args.y}) {}
+                                if let Err(_) = r.MOVE_BUFFER.enqueue(Movement::LinearMove(LinearMove{x: command.args.x, y: command.args.y})) {}
                             }
                             if (command.kind, command.number) == G2 {
-                                // TODO: have this create an ArcMove and add it to the movement buffer
+                                // TODO: don't unwrap here
+                                if let Err(_) = r.MOVE_BUFFER.enqueue(Movement::ArcMove(ArcMove::new(r.LOCATION.x, 
+                                                                                                     r.LOCATION.y, 
+                                                                                                     command.args.x.unwrap(), 
+                                                                                                     command.args.y.unwrap(), 
+                                                                                                     command.args.i.unwrap(), 
+                                                                                                     command.args.j.unwrap()))) {}
                             }
                             else if (command.kind, command.number) == M0 {
                                 while let Some(_) = r.MOVE_BUFFER.dequeue() {}
