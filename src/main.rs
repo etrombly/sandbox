@@ -13,40 +13,37 @@ extern crate cortex_m_rtfm as rtfm;
 extern crate gcode;
 #[macro_use(block)]
 extern crate nb;
-extern crate stepper_driver;
-extern crate stm32f103xx_hal as hal;
 extern crate heapless;
 extern crate m;
+extern crate stepper_driver;
+extern crate stm32f103xx_hal as hal;
 
 // used for encoding data to send over serial
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
 use core::str;
 
-// some float math that's not in core 
+// some float math that's not in core
 use m::Float as _0;
 
-use gcode::{Parser, Tokenizer};
 use gcode::parser::{CommandKind, Line, Number};
+use gcode::{Parser, Tokenizer};
 
-// used for the movement buffer
-use heapless::RingBuffer;
-
-use hal::prelude::*;
-use hal::stm32f103xx;
 use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
 use hal::gpio::gpiob::{PB5, PB6, PB7, PB8};
 use hal::gpio::{Output, PushPull};
+use hal::prelude::*;
 use hal::serial::{Rx, Serial, Tx};
-use hal::time::{MonoTimer, Instant};
-use hal::timer::{Timer, Event};
+use hal::stm32f103xx;
+use hal::time::{Instant, MonoTimer};
+use hal::timer::{Event, Timer};
 
 use cortex_m::peripheral::syst::SystClkSource;
 
 use rtfm::{app, Resource, Threshold};
 
-use stepper_driver::{Direction, Stepper};
 use stepper_driver::ic::ULN2003;
+use stepper_driver::{Direction, Stepper};
 
 const CARRIAGE_RETURN: u8 = 13;
 const NEW_LINE: u8 = 10;
@@ -62,26 +59,84 @@ const MAX_SPEED: f32 = 0.6;
 // max characters allowed in a line of gcode
 const RX_SZ: usize = 256;
 
+// number of moves to buffer
+const MOVE_SZ: usize = 256;
+
 // CONNECTIONS
 type TX = Tx<stm32f103xx::USART1>;
 type RX = Rx<stm32f103xx::USART1>;
 
+pub struct MoveBuffer {
+    head: usize,
+    tail: usize,
+    buffer: [Movement; MOVE_SZ],
+}
+
+impl MoveBuffer {
+    const fn new() -> MoveBuffer {
+        MoveBuffer {
+            head: 0,
+            tail: 0,
+            buffer: [Movement::LinearMove(LinearMove { x: None, y: None }); MOVE_SZ],
+        }
+    }
+
+    pub fn push(&mut self, movement: &Movement) -> Result<(), ()> {
+        let next_tail = (self.tail + 1) % MOVE_SZ;
+        if next_tail != self.head {
+            self.buffer[self.tail] = *movement;
+            self.tail = next_tail;
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    pub fn next(&mut self, location: &Point) -> Option<LinearMove> {
+        if self.head != self.tail {
+            match self.buffer[self.head] {
+                Movement::LinearMove(x) => {
+                    self.head = (self.head + 1) % MOVE_SZ;
+                    Some(x)
+                }
+                Movement::ArcMove(mut x) => {
+                    if x.finished(location) {
+                        self.head = (self.head + 1) % MOVE_SZ;
+                        self.next(location)
+                    } else {
+                        Some(x.step(location))
+                    }
+                }
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.tail = self.head;
+    }
+}
+
 // Serial recieve buffer
 pub struct Buffer {
     index: usize,
-    buffer: [u8; RX_SZ]
+    buffer: [u8; RX_SZ],
 }
 
 impl Buffer {
     const fn new() -> Buffer {
-        Buffer{index:0, buffer:[0; RX_SZ]}
+        Buffer {
+            index: 0,
+            buffer: [0; RX_SZ],
+        }
     }
 
-    pub fn insert(&mut self, data: &u8) -> Result<(), ()>{
+    pub fn push(&mut self, data: &u8) -> Result<(), ()> {
         if self.index < RX_SZ {
             self.buffer[self.index] = *data;
             self.index += 1;
-            return Ok(())
+            return Ok(());
         }
         Err(())
     }
@@ -116,7 +171,7 @@ const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
 const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
 const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
 const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
-const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop 
+const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
 
 /* May add these back in later if I bother with path planning
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
@@ -132,7 +187,6 @@ const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // S
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
 */
 
-
 // no power function in core, but I only need to square stuff so far
 pub trait Square {
     fn sqr(&self) -> f32;
@@ -146,7 +200,7 @@ impl Square for f32 {
 }
 
 // constrain a value between min and max
-pub fn clamp (min: f32, max: f32, value: f32) -> f32 {
+pub fn clamp(min: f32, max: f32, value: f32) -> f32 {
     if value < min {
         min
     } else if value > max {
@@ -162,6 +216,7 @@ pub struct Point {
 }
 
 // Linear movement
+#[derive(Clone, Copy)]
 pub struct LinearMove {
     pub x: Option<f32>,
     pub y: Option<f32>,
@@ -171,6 +226,7 @@ pub struct LinearMove {
 // TODO: current x and y should be in global state
 // TODO: change these to 2d points (maybe)
 // TODO: add direction (CW, CCW)
+#[derive(Clone, Copy)]
 pub struct ArcMove {
     end_x: f32,
     end_y: f32,
@@ -184,73 +240,87 @@ impl ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
         let radius = ((curr_x - center_x).sqr() + (curr_y - center_y).sqr()).sqrt();
-        ArcMove {end_x, 
-            end_y, 
-            center_x, 
-            center_y, 
+        ArcMove {
+            end_x,
+            end_y,
+            center_x,
+            center_y,
             radius,
         }
     }
-    
+
     // roughly translated from a python example, this can probably be optimized better
-    pub fn step(&mut self, curr_x: f32, curr_y: f32) -> LinearMove {
+    pub fn step(&mut self, location: &Point) -> LinearMove {
         // Figure out what quadrant we're in to know the next x and if y will be positive or negative
         // TODO: find a multiple of step size that works well for drawing line segments
-        let (next_x, y_sign) = match (curr_x > self.center_x, curr_y > self.center_y,
-                                      curr_x == self.center_x, curr_y == self.center_y) {
+        let (next_x, y_sign) = match (
+            location.x > self.center_x,
+            location.y > self.center_y,
+            location.x == self.center_x,
+            location.y == self.center_y,
+        ) {
             // top right or top
-            (true, true, false, false) |
-            (false, true, true, false)=> {
-                (clamp(self.center_x - self.radius, 
-                self.center_x + self.radius, 
-                curr_x + X_STEP_SIZE * 5.0),
-                1.0)
-            },
+            (true, true, false, false) | (false, true, true, false) => (
+                clamp(
+                    self.center_x - self.radius,
+                    self.center_x + self.radius,
+                    location.x + X_STEP_SIZE * 5.0,
+                ),
+                1.0,
+            ),
             // bottom right or right
-            (true, false, false, false) |
-            (true, false, false, true)=> {
-                (clamp(self.center_x - self.radius, 
-                self.center_x + self.radius, 
-                curr_x - X_STEP_SIZE * 5.0),
-                - 1.0)
-            },
+            (true, false, false, false) | (true, false, false, true) => (
+                clamp(
+                    self.center_x - self.radius,
+                    self.center_x + self.radius,
+                    location.x - X_STEP_SIZE * 5.0,
+                ),
+                -1.0,
+            ),
             // bottom left or bottom
-            (false, false, false, false) |
-            (false, false, true, false)=> {
-                (clamp(self.center_x - self.radius, 
-                self.center_x + self.radius, 
-                curr_x - X_STEP_SIZE * 5.0),
-                -1.0)
-            },
+            (false, false, false, false) | (false, false, true, false) => (
+                clamp(
+                    self.center_x - self.radius,
+                    self.center_x + self.radius,
+                    location.x - X_STEP_SIZE * 5.0,
+                ),
+                -1.0,
+            ),
             // top left or left
-            (false, true, false, false) |
-            (false, false, false, true)=> {
-                (clamp(self.center_x - self.radius, 
-                self.center_x + self.radius, 
-                curr_x + X_STEP_SIZE * 5.0),
-                1.0)
-            },
+            (false, true, false, false) | (false, false, false, true) => (
+                clamp(
+                    self.center_x - self.radius,
+                    self.center_x + self.radius,
+                    location.x + X_STEP_SIZE * 5.0,
+                ),
+                1.0,
+            ),
             // not actually possible to reach here
             _ => (0.0, 0.0),
         };
-        let d = next_x.sqr() - (2.0 * self.center_x * next_x) + self.center_x.sqr() + self.center_y.sqr() - self.radius.sqr();
+        let d = next_x.sqr() - (2.0 * self.center_x * next_x) + self.center_x.sqr()
+            + self.center_y.sqr() - self.radius.sqr();
         let D = self.center_y.sqr() - d;
         let next_y = self.center_y + (D.sqrt() * y_sign);
         // TODO: change this to add a linear move to the active movement
-        LinearMove{x: Some(next_x), y: Some(next_y)}
+        LinearMove {
+            x: Some(next_x),
+            y: Some(next_y),
+        }
     }
-    
-    pub fn finished(&self, curr_x: f32, curr_y: f32) -> bool {
-        if (curr_x - X_STEP_SIZE) < self.end_x &&
-           (curr_x + X_STEP_SIZE) > self.end_x &&
-           (curr_y - X_STEP_SIZE) < self.end_y &&
-           (curr_y + X_STEP_SIZE) > self.end_y{
-            return true
+
+    pub fn finished(&self, location: &Point) -> bool {
+        if (location.x - X_STEP_SIZE) < self.end_x && (location.x + X_STEP_SIZE) > self.end_x
+            && (location.y - X_STEP_SIZE) < self.end_y
+            && (location.y + X_STEP_SIZE) > self.end_y
+        {
+            return true;
         }
         false
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Movement {
     LinearMove(LinearMove),
     ArcMove(ArcMove),
@@ -268,7 +338,7 @@ app! {
         static TX: TX;
         static RX_BUF: Buffer = Buffer::new();
         static RX: RX;
-        static MOVE_BUFFER: RingBuffer<Movement, [Movement; 20]> = RingBuffer::new();
+        static MOVE_BUFFER: MoveBuffer = MoveBuffer::new();
         static MONO: MonoTimer;
         static LAST_UPDATE: Instant;
         static SLEEP: u32 = 0;
@@ -311,7 +381,7 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
         .sysclk(64.mhz())
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
-    
+
     // start timer for performance monnitoring
     let mono = MonoTimer::new(p.core.DWT, clocks);
 
@@ -320,11 +390,11 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     p.core.SYST.set_clock_source(SystClkSource::Core);
     p.core.SYST.set_reload(100_000);
     p.core.SYST.enable_interrupt();
-    p.core.SYST.enable_counter();        
-    
+    p.core.SYST.enable_counter();
+
     // These timers are used to control the step speed of the steppers
     // the initial update freq doesn't matter since they won't start until a move is received
-    // just don't set to 0hz 
+    // just don't set to 0hz
     let tim2 = Timer::tim2(p.device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
     let tim3 = Timer::tim3(p.device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
@@ -368,7 +438,7 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
     );
 
     // TODO: look in to changing serial TX back to DMA
-    for c in "initialized\r\n".as_bytes() {
+    for c in b"initialized\r\n" {
         block!(tx.write(*c)).ok();
     }
 
@@ -400,13 +470,8 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     // check if current move is done
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
         // if it is try to grab a move off the buffer
-        if let Some(new_move) = r.MOVE_BUFFER.dequeue() {
-            let movement = match new_move {
-                Movement::ArcMove(mut x) => x.step(r.LOCATION.x, r.LOCATION.y),
-                Movement::LinearMove(x) => x,
-            };
-            
-            match movement.x {
+        if let Some(new_move) = r.MOVE_BUFFER.next(&r.LOCATION) {
+            match new_move.x {
                 // if there's an x movement set the direction and make the movement positive
                 Some(x) => {
                     if x > 0.0 {
@@ -417,14 +482,14 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                         r.CURRENT.x = Some(x * -1.0);
                     }
                     r.TIMER_X.listen(Event::Update);
-                },
-                // if there isn't a move disable the stepper 
+                }
+                // if there isn't a move disable the stepper
                 None => {
                     r.CURRENT.x = None;
                     r.TIMER_X.unlisten(Event::Update);
-                },
+                }
             }
-            match movement.y {
+            match new_move.y {
                 // if there's an y movement set the direction and make the movement positive
                 Some(y) => {
                     if y > 0.0 {
@@ -435,33 +500,34 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                         r.CURRENT.y = Some(y * -1.0);
                     }
                     r.TIMER_Y.listen(Event::Update);
-                },
-                // if there isn't a move disable the stepper 
+                }
+                // if there isn't a move disable the stepper
                 None => {
                     r.CURRENT.y = None;
                     r.TIMER_Y.unlisten(Event::Update);
-                },
+                }
             }
-            
-            
+
             match (r.CURRENT.x, r.CURRENT.y) {
                 // calculate the stepper speeds so that x and y movement end at the same time
                 // (linear interpolation)
                 (Some(_x), None) => {
                     r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
-                },
+                }
                 (None, Some(_y)) => {
                     r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
-                },
+                }
                 (Some(x), Some(y)) => {
                     if x > y {
                         r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
-                        r.TIMER_Y.start((((MAX_SPEED / Y_STEP_SIZE) / (x / y)) as u32).hz());
+                        r.TIMER_Y
+                            .start((((MAX_SPEED / Y_STEP_SIZE) / (x / y)) as u32).hz());
                     } else {
-                        r.TIMER_X.start((((MAX_SPEED / X_STEP_SIZE) / (y / x)) as u32).hz());
+                        r.TIMER_X
+                            .start((((MAX_SPEED / X_STEP_SIZE) / (y / x)) as u32).hz());
                         r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
                     }
-                },
+                }
                 _ => {}
             }
         }
@@ -473,11 +539,11 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         *r.LAST_UPDATE = r.MONO.now();
         // write the cpu monitoring data out
         let mut data = [0; 4];
-        let mut buf: [u8; 5] = [0;5];
+        let mut buf: [u8; 5] = [0; 5];
         LE::write_u32(&mut data, *r.SLEEP);
         cobs::encode(&data, &mut buf);
         *r.SLEEP = 0;
-        for byte in buf.iter() {
+        for byte in &buf {
             block!(r.TX.write(*byte)).ok();
         }
     }
@@ -500,7 +566,7 @@ fn timer_x(_t: &mut Threshold, mut r: TIM2::Resources) {
         r.STEPPER_X.disable();
     }
 
-    if let Err(_) = r.TIMER_X.wait() {
+    if r.TIMER_X.wait().is_err() {
         //interrupts probably disabled
     }
 }
@@ -522,7 +588,7 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
         r.STEPPER_Y.disable();
     }
 
-    if let Err(_) = r.TIMER_Y.wait(){
+    if r.TIMER_Y.wait().is_err() {
         //interrupts probably disabled
     }
 }
@@ -533,7 +599,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
     // Read each character from serial as it comes in
     match r.RX.read() {
         Ok(c) => {
-            // different serial clients send different line endings, check for either 
+            // different serial clients send different line endings, check for either
             if c == CARRIAGE_RETURN || c == NEW_LINE {
                 if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
                     let lexer = Tokenizer::new(gcode.chars());
@@ -542,21 +608,33 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                     let parser = Parser::new(tokens);
                     for line in parser {
                         if let Ok(Line::Cmd(command)) = line {
-                            if (command.kind, command.number) == G0  || (command.kind, command.number) == G1 {
+                            if (command.kind, command.number) == G0
+                                || (command.kind, command.number) == G1
+                            {
                                 // TODO: Handle the buffer being full
-                                if let Err(_) = r.MOVE_BUFFER.enqueue(Movement::LinearMove(LinearMove{x: command.args.x, y: command.args.y})) {}
+                                if r.MOVE_BUFFER
+                                    .push(&Movement::LinearMove(LinearMove {
+                                        x: command.args.x,
+                                        y: command.args.y,
+                                    }))
+                                    .is_err()
+                                {}
                             }
                             if (command.kind, command.number) == G2 {
                                 // TODO: don't unwrap here
-                                if let Err(_) = r.MOVE_BUFFER.enqueue(Movement::ArcMove(ArcMove::new(r.LOCATION.x, 
-                                                                                                     r.LOCATION.y, 
-                                                                                                     command.args.x.unwrap(), 
-                                                                                                     command.args.y.unwrap(), 
-                                                                                                     command.args.i.unwrap(), 
-                                                                                                     command.args.j.unwrap()))) {}
-                            }
-                            else if (command.kind, command.number) == M0 {
-                                while let Some(_) = r.MOVE_BUFFER.dequeue() {}
+                                if r.MOVE_BUFFER
+                                    .push(&Movement::ArcMove(ArcMove::new(
+                                        r.LOCATION.x,
+                                        r.LOCATION.y,
+                                        command.args.x.unwrap(),
+                                        command.args.y.unwrap(),
+                                        command.args.i.unwrap(),
+                                        command.args.j.unwrap(),
+                                    )))
+                                    .is_err()
+                                {}
+                            } else if (command.kind, command.number) == M0 {
+                                r.MOVE_BUFFER.clear();
                                 r.CURRENT.x = None;
                                 r.CURRENT.y = None;
                             }
@@ -567,24 +645,25 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
             }
             // If it's not a newline add it to the input buffer
             // TODO: Handle the buffer being full
-            else if let Ok(_) = r.RX_BUF.insert(&c) {} 
-        },
+            else if r.RX_BUF.push(&c).is_ok() {
+            }
+        }
         Err(e) => {
             match e {
                 nb::Error::WouldBlock => {
-                    for c in "blocking\r\n".as_bytes() {
+                    for c in b"blocking\r\n" {
                         block!(r.TX.write(*c)).ok();
                     }
-                },
+                }
                 // currently no way to easily clear the overrun flag, if you hit this
                 // it'll be stuck here
                 nb::Error::Other(hal::serial::Error::Overrun) => {
-                    for c in "overrun error\r\n".as_bytes() {
+                    for c in b"overrun error\r\n" {
                         block!(r.TX.write(*c)).ok();
                     }
                 }
                 _ => {
-                    for c in "other error\r\n".as_bytes() {
+                    for c in b"other error\r\n" {
                         block!(r.TX.write(*c)).ok();
                     }
                 }
