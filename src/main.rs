@@ -4,6 +4,7 @@
 //#![deny(warnings)]
 #![feature(proc_macro)]
 #![feature(const_fn)]
+#![feature(core_float)]
 #![no_std]
 
 extern crate byteorder;
@@ -22,6 +23,7 @@ extern crate stm32f103xx_hal as hal;
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
 use core::str;
+use core::num::Float;
 
 // some float math that's not in core
 use m::Float as _0;
@@ -187,18 +189,6 @@ const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // S
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
 */
 
-// no power function in core, but I only need to square stuff so far
-pub trait Square {
-    fn sqr(&self) -> f32;
-}
-
-// TODO: handle overflows
-impl Square for f32 {
-    fn sqr(&self) -> f32 {
-        self * self
-    }
-}
-
 // constrain a value between min and max
 pub fn clamp(min: f32, max: f32, value: f32) -> f32 {
     if value < min {
@@ -222,6 +212,12 @@ pub struct LinearMove {
     pub y: Option<f32>,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum ArcDirection {
+    CW,
+    CCW,
+}
+
 // Struct to handle a G2 or G3 command
 // TODO: current x and y should be in global state
 // TODO: change these to 2d points (maybe)
@@ -233,19 +229,21 @@ pub struct ArcMove {
     center_x: f32,
     center_y: f32,
     radius: f32,
+    direction: ArcDirection,
 }
 
 impl ArcMove {
-    pub fn new(curr_x: f32, curr_y: f32, end_x: f32, end_y: f32, i: f32, j: f32) -> ArcMove {
+    pub fn new(curr_x: f32, curr_y: f32, end_x: f32, end_y: f32, i: f32, j: f32, direction: ArcDirection) -> ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
-        let radius = ((curr_x - center_x).sqr() + (curr_y - center_y).sqr()).sqrt();
+        let radius = ((curr_x - center_x).powi(2) + (curr_y - center_y).powi(2)).sqrt();
         ArcMove {
             end_x,
             end_y,
             center_x,
             center_y,
             radius,
+            direction,
         }
     }
 
@@ -253,7 +251,7 @@ impl ArcMove {
     pub fn step(&mut self, location: &Point) -> LinearMove {
         // Figure out what quadrant we're in to know the next x and if y will be positive or negative
         // TODO: find a multiple of step size that works well for drawing line segments
-        let (next_x, y_sign) = match (
+        let (mut next_x, mut y_sign) = match (
             location.x > self.center_x,
             location.y > self.center_y,
             location.x == self.center_x,
@@ -298,18 +296,26 @@ impl ArcMove {
             // not actually possible to reach here
             _ => (0.0, 0.0),
         };
-        let d = next_x.sqr() - (2.0 * self.center_x * next_x) + self.center_x.sqr()
-            + self.center_y.sqr() - self.radius.sqr();
-        let D = self.center_y.sqr() - d;
+
+        // TODO: probably a better way to do this
+        if self.direction == ArcDirection::CCW {
+            next_x = next_x * -1.0;
+            y_sign = y_sign * -1.0;
+        }
+
+        let d = next_x.powi(2) - (2.0 * self.center_x * next_x) + self.center_x.powi(2)
+            + self.center_y.powi(2) - self.radius.powi(2);
+        let D = self.center_y.powi(2) - d;
         let next_y = self.center_y + (D.sqrt() * y_sign);
-        // TODO: change this to add a linear move to the active movement
+        
         LinearMove {
             x: Some(next_x),
-            y: Some(next_y),
+            y: if next_y == 0.0 { None } else {Some(next_y)},
         }
     }
 
     pub fn finished(&self, location: &Point) -> bool {
+        // TODO: doesn't work for full circle because start and end are the same
         if (location.x - X_STEP_SIZE) < self.end_x && (location.x + X_STEP_SIZE) > self.end_x
             && (location.y - X_STEP_SIZE) < self.end_y
             && (location.y + X_STEP_SIZE) > self.end_y
@@ -509,6 +515,8 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
             }
 
             match (r.CURRENT.x, r.CURRENT.y) {
+                // TODO: test why these aren't matching up on longer moves
+                // TODO: handle x or y being zero
                 // calculate the stepper speeds so that x and y movement end at the same time
                 // (linear interpolation)
                 (Some(_x), None) => {
@@ -533,14 +541,16 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         }
     }
 
-    // send performance info every second
+    // send performance info twice a second
     // TODO: figure out a good interval, 1 second may be too long to be useful
     if r.LAST_UPDATE.elapsed() > 64_000_000 {
         *r.LAST_UPDATE = r.MONO.now();
         // write the cpu monitoring data out
-        let mut data = [0; 4];
-        let mut buf: [u8; 5] = [0; 5];
-        LE::write_u32(&mut data, *r.SLEEP);
+        let mut data = [0; 12];
+        let mut buf: [u8; 13] = [0; 13];
+        LE::write_u32(&mut data[0..4], *r.SLEEP);
+        LE::write_f32(&mut data[4..8], r.LOCATION.x);
+        LE::write_f32(&mut data[8..12], r.LOCATION.y);
         cobs::encode(&data, &mut buf);
         *r.SLEEP = 0;
         for byte in &buf {
@@ -608,6 +618,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                     let parser = Parser::new(tokens);
                     for line in parser {
                         if let Ok(Line::Cmd(command)) = line {
+                            // TODO: figure out why match wasn't working here
                             if (command.kind, command.number) == G0
                                 || (command.kind, command.number) == G1
                             {
@@ -619,9 +630,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                                     }))
                                     .is_err()
                                 {}
-                            }
-                            if (command.kind, command.number) == G2 {
-                                // TODO: don't unwrap here
+                            } else if (command.kind, command.number) == G2 {
                                 if r.MOVE_BUFFER
                                     .push(&Movement::ArcMove(ArcMove::new(
                                         r.LOCATION.x,
@@ -630,6 +639,20 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                                         command.args.y.unwrap(),
                                         command.args.i.unwrap(),
                                         command.args.j.unwrap(),
+                                        ArcDirection::CW,
+                                    )))
+                                    .is_err()
+                                {}
+                            } else if (command.kind, command.number) == G3 {
+                                if r.MOVE_BUFFER
+                                    .push(&Movement::ArcMove(ArcMove::new(
+                                        r.LOCATION.x,
+                                        r.LOCATION.y,
+                                        command.args.x.unwrap(),
+                                        command.args.y.unwrap(),
+                                        command.args.i.unwrap(),
+                                        command.args.j.unwrap(),
+                                        ArcDirection::CCW,
                                     )))
                                     .is_err()
                                 {}
