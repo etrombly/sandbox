@@ -68,6 +68,14 @@ const MOVE_SZ: usize = 256;
 type TX = Tx<stm32f103xx::USART1>;
 type RX = Rx<stm32f103xx::USART1>;
 
+pub fn ceil(x: f32) -> u32 {
+    let mut integer = x as u32;
+    if x > integer as f32 {
+        integer +=1;
+    }
+    integer
+}
+
 pub struct MoveBuffer {
     head: usize,
     tail: usize,
@@ -529,10 +537,10 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                     if x > y {
                         r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
                         r.TIMER_Y
-                            .start((((MAX_SPEED / Y_STEP_SIZE) / (x / y)) as u32).hz());
+                            .start(ceil((MAX_SPEED / Y_STEP_SIZE) / (x / y)).hz());
                     } else {
                         r.TIMER_X
-                            .start((((MAX_SPEED / X_STEP_SIZE) / (y / x)) as u32).hz());
+                            .start(ceil((MAX_SPEED / X_STEP_SIZE) / (y / x)).hz());
                         r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
                     }
                 }
