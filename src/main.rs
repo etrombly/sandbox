@@ -14,7 +14,6 @@ extern crate cortex_m_rtfm as rtfm;
 extern crate gcode;
 #[macro_use(block)]
 extern crate nb;
-extern crate heapless;
 extern crate m;
 extern crate stepper_driver;
 extern crate stm32f103xx_hal as hal;
