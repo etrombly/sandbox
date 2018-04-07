@@ -21,8 +21,8 @@ extern crate stm32f103xx_hal as hal;
 // used for encoding data to send over serial
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
-use core::str;
 use core::num::Float;
+use core::str;
 
 // some float math that's not in core
 use m::Float as _0;
@@ -169,27 +169,33 @@ impl Buffer {
         Err(())
     }
 
-    pub fn read(&mut self) -> Option<Buffer>{
+    pub fn read(&mut self) -> Option<Buffer> {
         if self.index > 0 {
             let tmp = self.index;
             self.index = 0;
-            Some(Buffer{index: tmp, buffer: self.buffer})
+            Some(Buffer {
+                index: tmp,
+                buffer: self.buffer,
+            })
         } else {
             None
         }
     }
 
     pub fn split(&mut self) -> Option<(Buffer, Buffer)> {
-        if let Some(index) = self.buffer.iter().position(|&x| x == CARRIAGE_RETURN || x == NEW_LINE) {
+        if let Some(index) = self.buffer
+            .iter()
+            .position(|&x| x == CARRIAGE_RETURN || x == NEW_LINE)
+        {
             let mut line = Buffer::new();
             let mut remainder = Buffer::new();
             for c in &self.buffer[0..index] {
                 // TODO: handle error here
-                if let Err(_) = line.push(c) {}
+                if line.push(c).is_err() {}
             }
             for c in &self.buffer[index + 1..self.index] {
                 // TODO: handle error here
-                if let Err(_) = remainder.push(c) {}
+                if remainder.push(c).is_err() {}
             }
             Some((line, remainder))
         } else {
@@ -234,7 +240,15 @@ pub struct ArcMove {
 
 // taken from marlin plan_arc in Marlin_main.cpp, removed anything dealing with the z axis or delta printers
 impl ArcMove {
-    pub fn new(curr_x: f32, curr_y: f32, end_x: f32, end_y: f32, i: f32, j: f32, direction: ArcDirection) -> ArcMove {
+    pub fn new(
+        curr_x: f32,
+        curr_y: f32,
+        end_x: f32,
+        end_y: f32,
+        i: f32,
+        j: f32,
+        direction: ArcDirection,
+    ) -> ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
         let radius = ((curr_x - center_x).powi(2) + (curr_y - center_y).powi(2)).sqrt();
@@ -251,10 +265,12 @@ impl ArcMove {
             angular_travel -= (360_f32).to_radians();
         }
         // Make a circle if the angular rotation is 0 and the target is current position
-        if angular_travel == 0.0 && curr_x == end_x && curr_y == end_y {
+        if angular_travel == 0.0 && core::num::Float::abs(curr_x - end_x) < core::f32::EPSILON
+            && core::num::Float::abs(curr_y - end_y) < core::f32::EPSILON
+        {
             angular_travel = (360_f32).to_radians();
         }
-        
+
         let mm_of_travel = core::num::Float::abs(angular_travel * radius);
 
         // double cast is a cheater floor()
@@ -280,7 +296,7 @@ impl ArcMove {
         let r_new_y = self.r_x * self.sin_t + self.r_y * self.cos_t;
         self.r_x = self.r_x * self.cos_t - self.r_y * self.sin_t;
         self.r_y = r_new_y;
-        
+
         self.segments -= 1.0;
 
         LinearMove {
@@ -476,7 +492,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         // add the data to the command buffer
         for c in &data.buffer[0..data.index] {
             // TODO: handle error here
-            if let Err(_) = r.CMD_BUF.push(c) {}
+            if r.CMD_BUF.push(c).is_err() {}
         }
         // if any lines have been received, process them
         while let Some((line, buffer)) = r.CMD_BUF.split() {
@@ -499,8 +515,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                                     y: command.args.y,
                                 }))
                                 .is_err()
-                            {} else {
-                                *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                            {
+                            } else {
+                                *r.VIRT_LOCATION = Point {
+                                    x: command.args.x.unwrap(),
+                                    y: command.args.y.unwrap(),
+                                };
                             }
                         // TODO: if path planning is going to be added arcs should be converted in to linear moves here
                         } else if (command.kind, command.number) == G2 {
@@ -515,8 +535,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                                     ArcDirection::CW,
                                 )))
                                 .is_err()
-                            {} else {
-                                *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                            {
+                            } else {
+                                *r.VIRT_LOCATION = Point {
+                                    x: command.args.x.unwrap(),
+                                    y: command.args.y.unwrap(),
+                                };
                             }
                         } else if (command.kind, command.number) == G3 {
                             if r.MOVE_BUFFER
@@ -598,12 +622,10 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                     if x > y {
                         let freq = MAX_FREQ_Y / (x / y) as u32 + 1;
                         r.TIMER_X.start(MAX_FREQ_X.hz());
-                        r.TIMER_Y
-                            .start(freq.hz());
+                        r.TIMER_Y.start(freq.hz());
                     } else {
                         let freq = MAX_FREQ_X / (y / x) as u32 + 1;
-                        r.TIMER_X
-                            .start(freq.hz());
+                        r.TIMER_X.start(freq.hz());
                         r.TIMER_Y.start(MAX_FREQ_Y.hz());
                     }
                 }
@@ -683,8 +705,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
     match r.RX.read() {
         Ok(c) => {
             // TODO: handle buffer being full
-            if r.RX_BUF.push(&c).is_ok() {
-            }
+            if r.RX_BUF.push(&c).is_ok() {}
         }
         Err(e) => {
             match e {
