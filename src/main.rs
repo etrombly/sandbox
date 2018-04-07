@@ -385,7 +385,7 @@ fn init(mut p: init::Peripherals, _r: init::Resources) -> init::LateResources {
         .pclk1(32.mhz())
         .freeze(&mut flash.acr);
 
-    // start timer for performance monnitoring
+    // start timer for performance monitoring
     let mono = MonoTimer::new(p.core.DWT, clocks);
 
     // configure the system timer
@@ -596,12 +596,12 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                 }
                 (Some(x), Some(y)) => {
                     if x > y {
-                        let freq = MAX_FREQ_Y / (x / y) as u32;
+                        let freq = MAX_FREQ_Y / (x / y) as u32 + 1;
                         r.TIMER_X.start(MAX_FREQ_X.hz());
                         r.TIMER_Y
                             .start(freq.hz());
                     } else {
-                        let freq = MAX_FREQ_X / (y / x) as u32;
+                        let freq = MAX_FREQ_X / (y / x) as u32 + 1;
                         r.TIMER_X
                             .start(freq.hz());
                         r.TIMER_Y.start(MAX_FREQ_Y.hz());
