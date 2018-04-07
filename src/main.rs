@@ -68,18 +68,30 @@ const RX_SZ: usize = 256;
 // number of moves to buffer
 const MOVE_SZ: usize = 256;
 
-// CONNECTIONS
-type TX = Tx<stm32f103xx::USART1>;
-type RX = Rx<stm32f103xx::USART1>;
+// GCODE command aliases
+const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
+const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
+const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
+const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
+const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
 
-pub fn ceil(x: f32) -> u32 {
-    let mut integer = x as u32;
-    if x > integer as f32 {
-        integer +=1;
-    }
-    integer
-}
+/* May add these back in later if I bother with path planning
+const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
+const M92: (CommandKind, Number) = (CommandKind::M, Number::Integer(92)); // Set steps per mm (unimplemented)
+const M114: (CommandKind, Number) = (CommandKind::M, Number::Integer(114)); // get current position (unimplemented)
+const M202: (CommandKind, Number) = (CommandKind::M, Number::Integer(202)); // Set max travel accel (unimplemented)
+const M203: (CommandKind, Number) = (CommandKind::M, Number::Integer(203)); // Set max feedrate /speed (unimplemented)
+const M204: (CommandKind, Number) = (CommandKind::M, Number::Integer(204)); // Set default accel (unimplemented)
+const M205: (CommandKind, Number) = (CommandKind::M, Number::Integer(205)); // Advanced settings / jerk (unimplemented)
+const M222: (CommandKind, Number) = (CommandKind::M, Number::Integer(222)); // Set speed for fast XY Moves (unimplemented)
+const M223: (CommandKind, Number) = (CommandKind::M, Number::Integer(223)); // Set speed for fast Z Moves (unimplemented)
+const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // Save settings (unimplemented)
+const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
+*/
 
+// TODO: put the structs in a lib
+// Movebuffer holds all movements parsed from gcode
+// modified from heapless ringbuffer
 pub struct MoveBuffer {
     head: usize,
     tail: usize,
@@ -109,10 +121,12 @@ impl MoveBuffer {
     pub fn next(&mut self) -> Option<LinearMove> {
         if self.head != self.tail {
             match &mut self.buffer[self.head] {
+                // if movement is linear just return it
                 Movement::LinearMove(x) => {
                     self.head = (self.head + 1) % MOVE_SZ;
                     Some(*x)
                 }
+                // if movement is an arc, get the next line segment
                 Movement::ArcMove(ref mut x) => {
                     // TODO: final step is going to be slightly off, do a final move to the last location
                     if x.segments == 0.0 {
@@ -161,58 +175,6 @@ impl Buffer {
     }
 }
 
-// the first stepper is connected to a ULN2003 on pins PA1-4
-#[allow(non_camel_case_types)]
-type STEPPER_X = Stepper<
-    PA1<Output<PushPull>>,
-    PA2<Output<PushPull>>,
-    PA3<Output<PushPull>>,
-    PA4<Output<PushPull>>,
-    ULN2003,
->;
-
-// the second stepper is connected to a ULN2003 on pins PB5-8
-#[allow(non_camel_case_types)]
-type STEPPER_Y = Stepper<
-    PB5<Output<PushPull>>,
-    PB6<Output<PushPull>>,
-    PB7<Output<PushPull>>,
-    PB8<Output<PushPull>>,
-    ULN2003,
->;
-
-// GCODE command aliases
-const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
-const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
-const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
-const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
-const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
-
-/* May add these back in later if I bother with path planning
-const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
-const M92: (CommandKind, Number) = (CommandKind::M, Number::Integer(92)); // Set steps per mm (unimplemented)
-const M114: (CommandKind, Number) = (CommandKind::M, Number::Integer(114)); // get current position (unimplemented)
-const M202: (CommandKind, Number) = (CommandKind::M, Number::Integer(202)); // Set max travel accel (unimplemented)
-const M203: (CommandKind, Number) = (CommandKind::M, Number::Integer(203)); // Set max feedrate /speed (unimplemented)
-const M204: (CommandKind, Number) = (CommandKind::M, Number::Integer(204)); // Set default accel (unimplemented)
-const M205: (CommandKind, Number) = (CommandKind::M, Number::Integer(205)); // Advanced settings / jerk (unimplemented)
-const M222: (CommandKind, Number) = (CommandKind::M, Number::Integer(222)); // Set speed for fast XY Moves (unimplemented)
-const M223: (CommandKind, Number) = (CommandKind::M, Number::Integer(223)); // Set speed for fast Z Moves (unimplemented)
-const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // Save settings (unimplemented)
-const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
-*/
-
-// constrain a value between min and max
-pub fn clamp(min: f32, max: f32, value: f32) -> f32 {
-    if value < min {
-        min
-    } else if value > max {
-        max
-    } else {
-        value
-    }
-}
-
 pub struct Point {
     pub x: f32,
     pub y: f32,
@@ -232,9 +194,7 @@ pub enum ArcDirection {
 }
 
 // Struct to handle a G2 or G3 command
-// TODO: current x and y should be in global state
 // TODO: change these to 2d points (maybe)
-// TODO: add direction (CW, CCW)
 #[derive(Clone, Copy)]
 pub struct ArcMove {
     pub end_x: f32,
@@ -307,11 +267,37 @@ impl ArcMove {
     }
 }
 
+// use an enum to allow the movebuffer to hold both types
 #[derive(Clone, Copy)]
 pub enum Movement {
     LinearMove(LinearMove),
     ArcMove(ArcMove),
 }
+
+// CONNECTIONS
+// serial tx and rx
+type TX = Tx<stm32f103xx::USART1>;
+type RX = Rx<stm32f103xx::USART1>;
+
+// the first stepper is connected to a ULN2003 on pins PA1-4
+#[allow(non_camel_case_types)]
+type STEPPER_X = Stepper<
+    PA1<Output<PushPull>>,
+    PA2<Output<PushPull>>,
+    PA3<Output<PushPull>>,
+    PA4<Output<PushPull>>,
+    ULN2003,
+>;
+
+// the second stepper is connected to a ULN2003 on pins PB5-8
+#[allow(non_camel_case_types)]
+type STEPPER_Y = Stepper<
+    PB5<Output<PushPull>>,
+    PB6<Output<PushPull>>,
+    PB7<Output<PushPull>>,
+    PB8<Output<PushPull>>,
+    ULN2003,
+>;
 
 app! {
     device: stm32f103xx,
@@ -319,17 +305,22 @@ app! {
     resources: {
         static STEPPER_X: STEPPER_X;
         static STEPPER_Y: STEPPER_Y;
+        // linear move that is active
         static CURRENT: LinearMove;
+        // timers to control stepper movement
         static TIMER_X: Timer<stm32f103xx::TIM2>;
         static TIMER_Y: Timer<stm32f103xx::TIM3>;
         static TX: TX;
         static RX_BUF: Buffer = Buffer::new();
         static RX: RX;
         static MOVE_BUFFER: MoveBuffer = MoveBuffer::new();
+        // monotimer for cpu monitor
         static MONO: MonoTimer;
         static LAST_UPDATE: Instant;
         static SLEEP: u32 = 0;
+        // current location
         static LOCATION: Point = Point{x: 0.0, y: 0.0};
+        // location once moves are processed (used for adding an arc movement)
         static VIRT_LOCATION: Point = Point{x: 0.0, y: 0.0};
     },
 
@@ -589,6 +580,7 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
 
 // serial recieve interrupt, triggered when there is data in RX buffer on the device
 // not using DMA because it's easier to process one byte at a time
+// have been running in to serial overrun errors occasionally
 fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
     // Read each character from serial as it comes in
     match r.RX.read() {
@@ -602,7 +594,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                     let parser = Parser::new(tokens);
                     for line in parser {
                         if let Ok(Line::Cmd(command)) = line {
-                            // TODO: figure out why match wasn't working here
+                            // TODO: switch this to a match
                             if (command.kind, command.number) == G0
                                 || (command.kind, command.number) == G1
                             {
@@ -616,6 +608,7 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                                 {} else {
                                     *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
                                 }
+                            // TODO: if path planning is going to be added arcs should be converted in to linear moves here
                             } else if (command.kind, command.number) == G2 {
                                 if r.MOVE_BUFFER
                                     .push(&Movement::ArcMove(ArcMove::new(
