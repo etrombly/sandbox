@@ -170,8 +170,32 @@ impl Buffer {
         Err(())
     }
 
-    pub fn clear(&mut self) {
-        self.index = 0;
+    pub fn read(&mut self) -> Option<Buffer>{
+        if self.index > 0 {
+            let tmp = self.index;
+            self.index = 0;
+            Some(Buffer{index: tmp, buffer: self.buffer})
+        } else {
+            None
+        }
+    }
+
+    pub fn split(&mut self) -> Option<(Buffer, Buffer)> {
+        if let Some(index) = self.buffer.iter().position(|&x| x == CARRIAGE_RETURN || x == NEW_LINE) {
+            let mut line = Buffer::new();
+            let mut remainder = Buffer::new();
+            for c in &self.buffer[0..index] {
+                // TODO: handle error here
+                if let Err(_) = line.push(c) {}
+            }
+            for c in &self.buffer[index + 1..self.index] {
+                // TODO: handle error here
+                if let Err(_) = remainder.push(c) {}
+            }
+            Some((line, remainder))
+        } else {
+            None
+        }
     }
 }
 
@@ -312,6 +336,7 @@ app! {
         static TIMER_Y: Timer<stm32f103xx::TIM3>;
         static TX: TX;
         static RX_BUF: Buffer = Buffer::new();
+        static CMD_BUF: Buffer = Buffer::new();
         static RX: RX;
         static MOVE_BUFFER: MoveBuffer = MoveBuffer::new();
         // monotimer for cpu monitor
@@ -331,7 +356,7 @@ app! {
     tasks: {
         SYS_TICK: {
             path: sys_tick,
-            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP, LAST_UPDATE, MONO, LOCATION],
+            resources: [TX, TIMER_X, TIMER_Y, CURRENT, MOVE_BUFFER, STEPPER_X, STEPPER_Y, SLEEP, LAST_UPDATE, MONO, LOCATION, VIRT_LOCATION, RX_BUF, CMD_BUF],
         },
 
         TIM2: {
@@ -346,7 +371,7 @@ app! {
 
         USART1: {
             path: rx,
-            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF, LOCATION, VIRT_LOCATION],
+            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF, LOCATION],
         }
     },
 }
@@ -444,8 +469,80 @@ fn idle(t: &mut Threshold, mut r: idle::Resources) -> ! {
     }
 }
 
-// Sys_tick mainly handles the movement buffer, not using any path planning since the steppers are slow
+// Sys_tick mainly handles the movement and command buffers, not using any path planning since the steppers are slow
 fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
+    // check if any commands have been received, if so process the gcode
+    // TODO: this currently isn't fast enough to keep up if batches of commands are sent
+    if let Some(data) = r.RX_BUF.read() {
+        // add the data to the command buffer
+        for c in &data.buffer[0..data.index] {
+            // TODO: handle error here
+            if let Err(_) = r.CMD_BUF.push(c) {}
+        }
+        // if any lines have been received, process them
+        while let Some((line, buffer)) = r.CMD_BUF.split() {
+            *r.CMD_BUF = buffer;
+            if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
+                let lexer = Tokenizer::new(gcode.chars());
+                // TODO: add error handling here
+                let tokens = lexer.filter_map(|t| t.ok());
+                let parser = Parser::new(tokens);
+                for line in parser {
+                    if let Ok(Line::Cmd(command)) = line {
+                        // TODO: switch this to a match
+                        if (command.kind, command.number) == G0
+                            || (command.kind, command.number) == G1
+                        {
+                            // TODO: Handle the buffer being full
+                            if r.MOVE_BUFFER
+                                .push(&Movement::LinearMove(LinearMove {
+                                    x: command.args.x,
+                                    y: command.args.y,
+                                }))
+                                .is_err()
+                            {} else {
+                                *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                            }
+                        // TODO: if path planning is going to be added arcs should be converted in to linear moves here
+                        } else if (command.kind, command.number) == G2 {
+                            if r.MOVE_BUFFER
+                                .push(&Movement::ArcMove(ArcMove::new(
+                                    r.VIRT_LOCATION.x,
+                                    r.VIRT_LOCATION.y,
+                                    command.args.x.unwrap(),
+                                    command.args.y.unwrap(),
+                                    command.args.i.unwrap(),
+                                    command.args.j.unwrap(),
+                                    ArcDirection::CW,
+                                )))
+                                .is_err()
+                            {} else {
+                                *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                            }
+                        } else if (command.kind, command.number) == G3 {
+                            if r.MOVE_BUFFER
+                                .push(&Movement::ArcMove(ArcMove::new(
+                                    r.LOCATION.x,
+                                    r.LOCATION.y,
+                                    command.args.x.unwrap(),
+                                    command.args.y.unwrap(),
+                                    command.args.i.unwrap(),
+                                    command.args.j.unwrap(),
+                                    ArcDirection::CCW,
+                                )))
+                                .is_err()
+                            {}
+                        } else if (command.kind, command.number) == M0 {
+                            r.MOVE_BUFFER.clear();
+                            r.CURRENT.x = None;
+                            r.CURRENT.y = None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // check if current move is done
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
         // if it is try to grab a move off the buffer
@@ -580,76 +677,14 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
 
 // serial recieve interrupt, triggered when there is data in RX buffer on the device
 // not using DMA because it's easier to process one byte at a time
-// have been running in to serial overrun errors occasionally
+// moved gcode processing to sys_tick due to serial overrun errors
+// need to keep this handler as fast as possible
 fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
     // Read each character from serial as it comes in
     match r.RX.read() {
         Ok(c) => {
-            // different serial clients send different line endings, check for either
-            if c == CARRIAGE_RETURN || c == NEW_LINE {
-                if let Ok(gcode) = str::from_utf8(&r.RX_BUF.buffer[0..r.RX_BUF.index]) {
-                    let lexer = Tokenizer::new(gcode.chars());
-                    // TODO: add error handling here
-                    let tokens = lexer.filter_map(|t| t.ok());
-                    let parser = Parser::new(tokens);
-                    for line in parser {
-                        if let Ok(Line::Cmd(command)) = line {
-                            // TODO: switch this to a match
-                            if (command.kind, command.number) == G0
-                                || (command.kind, command.number) == G1
-                            {
-                                // TODO: Handle the buffer being full
-                                if r.MOVE_BUFFER
-                                    .push(&Movement::LinearMove(LinearMove {
-                                        x: command.args.x,
-                                        y: command.args.y,
-                                    }))
-                                    .is_err()
-                                {} else {
-                                    *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
-                                }
-                            // TODO: if path planning is going to be added arcs should be converted in to linear moves here
-                            } else if (command.kind, command.number) == G2 {
-                                if r.MOVE_BUFFER
-                                    .push(&Movement::ArcMove(ArcMove::new(
-                                        r.VIRT_LOCATION.x,
-                                        r.VIRT_LOCATION.y,
-                                        command.args.x.unwrap(),
-                                        command.args.y.unwrap(),
-                                        command.args.i.unwrap(),
-                                        command.args.j.unwrap(),
-                                        ArcDirection::CW,
-                                    )))
-                                    .is_err()
-                                {} else {
-                                    *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
-                                }
-                            } else if (command.kind, command.number) == G3 {
-                                if r.MOVE_BUFFER
-                                    .push(&Movement::ArcMove(ArcMove::new(
-                                        r.LOCATION.x,
-                                        r.LOCATION.y,
-                                        command.args.x.unwrap(),
-                                        command.args.y.unwrap(),
-                                        command.args.i.unwrap(),
-                                        command.args.j.unwrap(),
-                                        ArcDirection::CCW,
-                                    )))
-                                    .is_err()
-                                {}
-                            } else if (command.kind, command.number) == M0 {
-                                r.MOVE_BUFFER.clear();
-                                r.CURRENT.x = None;
-                                r.CURRENT.y = None;
-                            }
-                        }
-                    }
-                }
-                r.RX_BUF.clear();
-            }
-            // If it's not a newline add it to the input buffer
-            // TODO: Handle the buffer being full
-            else if r.RX_BUF.push(&c).is_ok() {
+            // TODO: handle buffer being full
+            if r.RX_BUF.push(&c).is_ok() {
             }
         }
         Err(e) => {
