@@ -57,6 +57,10 @@ const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max speed in mm/s
 const MAX_SPEED: f32 = 0.6;
+const MAX_FREQ_X: u32 = (MAX_SPEED / X_STEP_SIZE) as u32;
+const MAX_FREQ_Y: u32 = (MAX_SPEED / Y_STEP_SIZE) as u32;
+// Length of linear segment for arcs
+const MM_PER_ARC_SEGMENT: f32 = 1.0;
 
 // max characters allowed in a line of gcode
 const RX_SZ: usize = 256;
@@ -102,19 +106,20 @@ impl MoveBuffer {
         }
     }
 
-    pub fn next(&mut self, location: &Point) -> Option<LinearMove> {
+    pub fn next(&mut self) -> Option<LinearMove> {
         if self.head != self.tail {
-            match self.buffer[self.head] {
+            match &mut self.buffer[self.head] {
                 Movement::LinearMove(x) => {
                     self.head = (self.head + 1) % MOVE_SZ;
-                    Some(x)
+                    Some(*x)
                 }
-                Movement::ArcMove(mut x) => {
-                    if x.finished(location) {
+                Movement::ArcMove(ref mut x) => {
+                    // TODO: final step is going to be slightly off, do a final move to the last location
+                    if x.segments == 0.0 {
                         self.head = (self.head + 1) % MOVE_SZ;
-                        self.next(location)
+                        None
                     } else {
-                        Some(x.step(location))
+                        Some(x.step())
                     }
                 }
             }
@@ -232,105 +237,73 @@ pub enum ArcDirection {
 // TODO: add direction (CW, CCW)
 #[derive(Clone, Copy)]
 pub struct ArcMove {
-    end_x: f32,
-    end_y: f32,
-    center_x: f32,
-    center_y: f32,
-    radius: f32,
-    direction: ArcDirection,
+    pub end_x: f32,
+    pub end_y: f32,
+    pub center_x: f32,
+    pub center_y: f32,
+    pub radius: f32,
+    pub r_x: f32,
+    pub r_y: f32,
+    pub sin_t: f32,
+    pub cos_t: f32,
+    pub segments: f32,
 }
 
+// taken from marlin plan_arc in Marlin_main.cpp, removed anything dealing with the z axis or delta printers
 impl ArcMove {
     pub fn new(curr_x: f32, curr_y: f32, end_x: f32, end_y: f32, i: f32, j: f32, direction: ArcDirection) -> ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
         let radius = ((curr_x - center_x).powi(2) + (curr_y - center_y).powi(2)).sqrt();
+        let r_x = -i;
+        let r_y = -j;
+        let rt_x = end_x - center_x;
+        let rt_y = end_y - center_y;
+        let mut angular_travel = (r_x * rt_y - r_y * rt_x).atan2(r_x * rt_x + r_y * rt_y);
+
+        if angular_travel < 0.0 {
+            angular_travel += (360_f32).to_radians();
+        }
+        if direction == ArcDirection::CW {
+            angular_travel -= (360_f32).to_radians();
+        }
+        // Make a circle if the angular rotation is 0 and the target is current position
+        if angular_travel == 0.0 && curr_x == end_x && curr_y == end_y {
+            angular_travel = (360_f32).to_radians();
+        }
+        
+        let mm_of_travel = core::num::Float::abs(angular_travel * radius);
+
+        // double cast is a cheater floor()
+        let segments = (mm_of_travel / MM_PER_ARC_SEGMENT) as u32 as f32;
+        let sin_t = angular_travel / segments;
+        let cos_t = 1.0 - 0.5 * (sin_t).powi(2); // Small angle approximation
+
         ArcMove {
             end_x,
             end_y,
             center_x,
             center_y,
             radius,
-            direction,
+            r_x,
+            r_y,
+            sin_t,
+            cos_t,
+            segments,
         }
     }
 
-    // roughly translated from a python example, this can probably be optimized better
-    pub fn step(&mut self, location: &Point) -> LinearMove {
-        // Figure out what quadrant we're in to know the next x and if y will be positive or negative
-        // TODO: find a multiple of step size that works well for drawing line segments
-        let (mut next_x, mut y_sign) = match (
-            location.x > self.center_x,
-            location.y > self.center_y,
-            location.x == self.center_x,
-            location.y == self.center_y,
-        ) {
-            // top right or top
-            (true, true, false, false) | (false, true, true, false) => (
-                clamp(
-                    self.center_x - self.radius,
-                    self.center_x + self.radius,
-                    location.x + X_STEP_SIZE * 5.0,
-                ),
-                1.0,
-            ),
-            // bottom right or right
-            (true, false, false, false) | (true, false, false, true) => (
-                clamp(
-                    self.center_x - self.radius,
-                    self.center_x + self.radius,
-                    location.x - X_STEP_SIZE * 5.0,
-                ),
-                -1.0,
-            ),
-            // bottom left or bottom
-            (false, false, false, false) | (false, false, true, false) => (
-                clamp(
-                    self.center_x - self.radius,
-                    self.center_x + self.radius,
-                    location.x - X_STEP_SIZE * 5.0,
-                ),
-                -1.0,
-            ),
-            // top left or left
-            (false, true, false, false) | (false, false, false, true) => (
-                clamp(
-                    self.center_x - self.radius,
-                    self.center_x + self.radius,
-                    location.x + X_STEP_SIZE * 5.0,
-                ),
-                1.0,
-            ),
-            // not actually possible to reach here
-            _ => (0.0, 0.0),
-        };
-
-        // TODO: probably a better way to do this
-        if self.direction == ArcDirection::CCW {
-            next_x = next_x * -1.0;
-            y_sign = y_sign * -1.0;
-        }
-
-        let d = next_x.powi(2) - (2.0 * self.center_x * next_x) + self.center_x.powi(2)
-            + self.center_y.powi(2) - self.radius.powi(2);
-        let D = self.center_y.powi(2) - d;
-        let next_y = self.center_y + (D.sqrt() * y_sign);
+    pub fn step(&mut self) -> LinearMove {
+        let r_new_y = self.r_x * self.sin_t + self.r_y * self.cos_t;
+        self.r_x = self.r_x * self.cos_t - self.r_y * self.sin_t;
+        self.r_y = r_new_y;
         
-        LinearMove {
-            x: Some(next_x),
-            y: if next_y == 0.0 { None } else {Some(next_y)},
-        }
-    }
+        self.segments -= 1.0;
 
-    pub fn finished(&self, location: &Point) -> bool {
-        // TODO: doesn't work for full circle because start and end are the same
-        if (location.x - X_STEP_SIZE) < self.end_x && (location.x + X_STEP_SIZE) > self.end_x
-            && (location.y - X_STEP_SIZE) < self.end_y
-            && (location.y + X_STEP_SIZE) > self.end_y
-        {
-            return true;
+        LinearMove {
+            x: Some(self.center_x + self.r_x),
+            y: Some(self.center_y + self.r_y),
         }
-        false
     }
 }
 
@@ -357,6 +330,7 @@ app! {
         static LAST_UPDATE: Instant;
         static SLEEP: u32 = 0;
         static LOCATION: Point = Point{x: 0.0, y: 0.0};
+        static VIRT_LOCATION: Point = Point{x: 0.0, y: 0.0};
     },
 
     idle: {
@@ -381,7 +355,7 @@ app! {
 
         USART1: {
             path: rx,
-            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF, LOCATION],
+            resources: [RX, TX, MOVE_BUFFER, CURRENT, RX_BUF, LOCATION, VIRT_LOCATION],
         }
     },
 }
@@ -484,17 +458,17 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
     // check if current move is done
     if r.CURRENT.x.is_none() && r.CURRENT.y.is_none() {
         // if it is try to grab a move off the buffer
-        if let Some(new_move) = r.MOVE_BUFFER.next(&r.LOCATION) {
+        if let Some(new_move) = r.MOVE_BUFFER.next() {
             match new_move.x {
                 // if there's an x movement set the direction and make the movement positive
                 Some(x) => {
-                    if x > 0.0 {
+                    let next = x - r.LOCATION.x;
+                    if next > 0.0 {
                         r.STEPPER_X.direction(Direction::CW);
-                        r.CURRENT.x = Some(x);
                     } else {
                         r.STEPPER_X.direction(Direction::CCW);
-                        r.CURRENT.x = Some(x * -1.0);
                     }
+                    r.CURRENT.x = Some(core::num::Float::abs(next));
                     r.TIMER_X.listen(Event::Update);
                 }
                 // if there isn't a move disable the stepper
@@ -506,13 +480,13 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
             match new_move.y {
                 // if there's an y movement set the direction and make the movement positive
                 Some(y) => {
-                    if y > 0.0 {
+                    let next = y - r.LOCATION.y;
+                    if next > 0.0 {
                         r.STEPPER_Y.direction(Direction::CW);
-                        r.CURRENT.y = Some(y);
                     } else {
                         r.STEPPER_Y.direction(Direction::CCW);
-                        r.CURRENT.y = Some(y * -1.0);
                     }
+                    r.CURRENT.y = Some(core::num::Float::abs(next));
                     r.TIMER_Y.listen(Event::Update);
                 }
                 // if there isn't a move disable the stepper
@@ -528,20 +502,22 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                 // calculate the stepper speeds so that x and y movement end at the same time
                 // (linear interpolation)
                 (Some(_x), None) => {
-                    r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
+                    r.TIMER_X.start(MAX_FREQ_X.hz());
                 }
                 (None, Some(_y)) => {
-                    r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
+                    r.TIMER_Y.start(MAX_FREQ_Y.hz());
                 }
                 (Some(x), Some(y)) => {
                     if x > y {
-                        r.TIMER_X.start(((MAX_SPEED / X_STEP_SIZE) as u32).hz());
+                        let freq = MAX_FREQ_Y / (x / y) as u32;
+                        r.TIMER_X.start(MAX_FREQ_X.hz());
                         r.TIMER_Y
-                            .start(ceil((MAX_SPEED / Y_STEP_SIZE) / (x / y)).hz());
+                            .start(freq.hz());
                     } else {
+                        let freq = MAX_FREQ_X / (y / x) as u32;
                         r.TIMER_X
-                            .start(ceil((MAX_SPEED / X_STEP_SIZE) / (y / x)).hz());
-                        r.TIMER_Y.start(((MAX_SPEED / Y_STEP_SIZE) as u32).hz());
+                            .start(freq.hz());
+                        r.TIMER_Y.start(MAX_FREQ_Y.hz());
                     }
                 }
                 _ => {}
@@ -549,7 +525,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         }
     }
 
-    // send performance info twice a second
+    // send performance info once a second
     // TODO: figure out a good interval, 1 second may be too long to be useful
     if r.LAST_UPDATE.elapsed() > 64_000_000 {
         *r.LAST_UPDATE = r.MONO.now();
@@ -637,12 +613,14 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                                         y: command.args.y,
                                     }))
                                     .is_err()
-                                {}
+                                {} else {
+                                    *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                                }
                             } else if (command.kind, command.number) == G2 {
                                 if r.MOVE_BUFFER
                                     .push(&Movement::ArcMove(ArcMove::new(
-                                        r.LOCATION.x,
-                                        r.LOCATION.y,
+                                        r.VIRT_LOCATION.x,
+                                        r.VIRT_LOCATION.y,
                                         command.args.x.unwrap(),
                                         command.args.y.unwrap(),
                                         command.args.i.unwrap(),
@@ -650,7 +628,9 @@ fn rx(_t: &mut Threshold, mut r: USART1::Resources) {
                                         ArcDirection::CW,
                                     )))
                                     .is_err()
-                                {}
+                                {} else {
+                                    *r.VIRT_LOCATION = Point{x: command.args.x.unwrap(), y: command.args.y.unwrap()};
+                                }
                             } else if (command.kind, command.number) == G3 {
                                 if r.MOVE_BUFFER
                                     .push(&Movement::ArcMove(ArcMove::new(
