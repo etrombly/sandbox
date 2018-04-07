@@ -1,7 +1,23 @@
 # `sandbox`
 
-> A zen garden sandbox. Will take a gcode drawing and sketch it in the sand.
+A zen garden sandbox. Will take a gcode drawing and sketch it in the sand.
 
+Can parse:
+
+ G0, G1 (linear move)
+
+ G2, G3 (Arc move)
+ 
+ M0 (emergency stop)  
+
+Todo:
+
+  Homing
+  
+  Save settings
+  
+  Maybe bluetooth to load drawings
+  
 # License
 
 Licensed under either of
