@@ -696,7 +696,7 @@ fn timer_y(_t: &mut Threshold, mut r: TIM3::Resources) {
     }
 }
 
-// serial recieve interrupt, triggered when there is data in RX buffer on the device
+// serial receive interrupt, triggered when there is data in RX buffer on the device
 // not using DMA because it's easier to process one byte at a time
 // moved gcode processing to sys_tick due to serial overrun errors
 // need to keep this handler as fast as possible
