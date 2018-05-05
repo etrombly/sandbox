@@ -4,9 +4,9 @@
 //#![deny(warnings)]
 #![feature(proc_macro)]
 #![feature(const_fn)]
-#![feature(core_float)]
 #![no_std]
 
+extern crate panic_abort;
 extern crate byteorder;
 extern crate cobs;
 extern crate cortex_m;
@@ -21,7 +21,6 @@ extern crate stm32f103xx_hal as hal;
 // used for encoding data to send over serial
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
-use core::num::Float;
 use core::str;
 
 // some float math that's not in core
@@ -88,6 +87,30 @@ const M500: (CommandKind, Number) = (CommandKind::M, Number::Integer(500)); // S
 const M501: (CommandKind, Number) = (CommandKind::M, Number::Integer(501)); // Restore settings (unimplemented)
 */
 
+trait Util {
+    fn powi(&self, exp: i32) -> f32;
+    fn abs(&self) -> f32;
+}
+
+impl Util for f32 {
+    // TODO: this should have overflow checking
+    fn powi(&self, exp: i32) -> f32 {
+        let mut tmp = *self;
+        for _ in 1..exp {
+            tmp = tmp * self;
+        }
+        tmp
+    }
+
+    fn abs(&self) -> f32 {
+        if self < &0_f32 {
+            -(*self)
+        } else {
+            *self
+        }
+    }
+}
+
 // TODO: put the structs in a lib
 // Movebuffer holds all movements parsed from gcode
 // modified from heapless ringbuffer
@@ -146,7 +169,7 @@ impl MoveBuffer {
     }
 }
 
-// Serial recieve buffer
+// Serial receive buffer
 pub struct Buffer {
     index: usize,
     buffer: [u8; RX_SZ],
@@ -265,13 +288,13 @@ impl ArcMove {
             angular_travel -= (360_f32).to_radians();
         }
         // Make a circle if the angular rotation is 0 and the target is current position
-        if angular_travel == 0.0 && core::num::Float::abs(curr_x - end_x) < core::f32::EPSILON
-            && core::num::Float::abs(curr_y - end_y) < core::f32::EPSILON
+        if angular_travel == 0.0 && (curr_x - end_x).abs() < core::f32::EPSILON
+            && (curr_y - end_y).abs() < core::f32::EPSILON
         {
             angular_travel = (360_f32).to_radians();
         }
 
-        let mm_of_travel = core::num::Float::abs(angular_travel * radius);
+        let mm_of_travel = (angular_travel * radius).abs();
 
         // double cast is a cheater floor()
         let segments = (mm_of_travel / MM_PER_ARC_SEGMENT) as u32 as f32;
@@ -579,7 +602,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                     } else {
                         r.STEPPER_X.direction(Direction::CCW);
                     }
-                    r.CURRENT.x = Some(core::num::Float::abs(next));
+                    r.CURRENT.x = Some((next).abs());
                     r.TIMER_X.listen(Event::Update);
                 }
                 // if there isn't a move disable the stepper
@@ -597,7 +620,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
                     } else {
                         r.STEPPER_Y.direction(Direction::CCW);
                     }
-                    r.CURRENT.y = Some(core::num::Float::abs(next));
+                    r.CURRENT.y = Some((next).abs());
                     r.TIMER_Y.listen(Event::Update);
                 }
                 // if there isn't a move disable the stepper
@@ -636,7 +659,7 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
 
     // send performance info once a second
     // TODO: figure out a good interval, 1 second may be too long to be useful
-    if r.LAST_UPDATE.elapsed() > 64_000_000 {
+    if r.LAST_UPDATE.elapsed() > 32_000_000 {
         *r.LAST_UPDATE = r.MONO.now();
         // write the cpu monitoring data out
         let mut data = [0; 12];
