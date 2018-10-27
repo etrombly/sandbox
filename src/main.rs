@@ -2,8 +2,8 @@
 
 #![deny(unsafe_code)]
 //#![deny(warnings)]
-#![feature(proc_macro)]
 #![feature(const_fn)]
+#![no_main]
 #![no_std]
 
 extern crate panic_abort;
@@ -26,8 +26,7 @@ use core::str;
 // some float math that's not in core
 use m::Float as _0;
 
-use gcode::parser::{CommandKind, Line, Number};
-use gcode::{Parser, Tokenizer};
+use gcode::Mnemonic;
 
 use hal::gpio::gpioa::{PA1, PA2, PA3, PA4};
 use hal::gpio::gpiob::{PB5, PB6, PB7, PB8};
@@ -67,11 +66,13 @@ const RX_SZ: usize = 256;
 const MOVE_SZ: usize = 256;
 
 // GCODE command aliases
+/*
 const G0: (CommandKind, Number) = (CommandKind::G, Number::Integer(0)); // Move
 const G1: (CommandKind, Number) = (CommandKind::G, Number::Integer(1)); // Move
 const G2: (CommandKind, Number) = (CommandKind::G, Number::Integer(2)); // Clockwise arc
 const G3: (CommandKind, Number) = (CommandKind::G, Number::Integer(3)); // Counterclockwise arc
 const M0: (CommandKind, Number) = (CommandKind::M, Number::Integer(0)); // unconditional stop
+*/
 
 /* May add these back in later if I bother with path planning
 const M18: (CommandKind, Number) = (CommandKind::M, Number::Integer(18)); // disable steppers (unimplemented)
@@ -521,68 +522,75 @@ fn sys_tick(_t: &mut Threshold, mut r: SYS_TICK::Resources) {
         while let Some((line, buffer)) = r.CMD_BUF.split() {
             *r.CMD_BUF = buffer;
             if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
-                let lexer = Tokenizer::new(gcode.chars());
-                // TODO: add error handling here
-                let tokens = lexer.filter_map(|t| t.ok());
-                let parser = Parser::new(tokens);
-                for line in parser {
-                    if let Ok(Line::Cmd(command)) = line {
-                        // TODO: switch this to a match
-                        if (command.kind, command.number) == G0
-                            || (command.kind, command.number) == G1
-                        {
-                            // TODO: Handle the buffer being full
-                            if r.MOVE_BUFFER
-                                .push(&Movement::LinearMove(LinearMove {
-                                    x: command.args.x,
-                                    y: command.args.y,
-                                }))
-                                .is_err()
-                            {
-                            } else {
-                                *r.VIRT_LOCATION = Point {
-                                    x: command.args.x.unwrap(),
-                                    y: command.args.y.unwrap(),
-                                };
+                for line in gcode::parse(&gcode) {
+                    match line.mnemonic() {
+                        Mnemonic::General => {
+                            match line.major_number() {
+                                0 | 1 => {
+                                    // TODO: Handle the buffer being full
+                                    if r.MOVE_BUFFER
+                                        .push(&Movement::LinearMove(LinearMove {
+                                            x: line.value_for('x'),
+                                            y: line.value_for('y'),
+                                        }))
+                                        .is_err()
+                                    {
+                                    } else {
+                                        *r.VIRT_LOCATION = Point {
+                                            x: line.value_for('x').unwrap(),
+                                            y: line.value_for('y').unwrap(),
+                                        };
+                                    }
+                                },
+                                // TODO: if path planning is going to be added arcs should be converted in to linear moves here
+                                2 => {
+                                    if r.MOVE_BUFFER
+                                        .push(&Movement::ArcMove(ArcMove::new(
+                                            r.VIRT_LOCATION.x,
+                                            r.VIRT_LOCATION.y,
+                                            line.value_for('x').unwrap(),
+                                            line.value_for('y').unwrap(),
+                                            line.value_for('i').unwrap(),
+                                            line.value_for('j').unwrap(),
+                                            ArcDirection::CW,
+                                        )))
+                                        .is_err()
+                                    {
+                                    } else {
+                                        *r.VIRT_LOCATION = Point {
+                                            x: line.value_for('x').unwrap(),
+                                            y: line.value_for('y').unwrap(),
+                                        };
+                                    }
+                                },
+                                3 => {
+                                    if r.MOVE_BUFFER
+                                        .push(&Movement::ArcMove(ArcMove::new(
+                                            r.LOCATION.x,
+                                            r.LOCATION.y,
+                                            line.value_for('x').unwrap(),
+                                            line.value_for('y').unwrap(),
+                                            line.value_for('i').unwrap(),
+                                            line.value_for('j').unwrap(),
+                                            ArcDirection::CCW,
+                                        )))
+                                        .is_err()
+                                    {}
+                                },
+                                _ => {},
                             }
-                        // TODO: if path planning is going to be added arcs should be converted in to linear moves here
-                        } else if (command.kind, command.number) == G2 {
-                            if r.MOVE_BUFFER
-                                .push(&Movement::ArcMove(ArcMove::new(
-                                    r.VIRT_LOCATION.x,
-                                    r.VIRT_LOCATION.y,
-                                    command.args.x.unwrap(),
-                                    command.args.y.unwrap(),
-                                    command.args.i.unwrap(),
-                                    command.args.j.unwrap(),
-                                    ArcDirection::CW,
-                                )))
-                                .is_err()
-                            {
-                            } else {
-                                *r.VIRT_LOCATION = Point {
-                                    x: command.args.x.unwrap(),
-                                    y: command.args.y.unwrap(),
-                                };
+                        },
+                        Mnemonic::Miscellaneous => {
+                            match line.major_number() {
+                                0 => {
+                                    r.MOVE_BUFFER.clear();
+                                    r.CURRENT.x = None;
+                                    r.CURRENT.y = None;
+                                },
+                                _ => {},
                             }
-                        } else if (command.kind, command.number) == G3 {
-                            if r.MOVE_BUFFER
-                                .push(&Movement::ArcMove(ArcMove::new(
-                                    r.LOCATION.x,
-                                    r.LOCATION.y,
-                                    command.args.x.unwrap(),
-                                    command.args.y.unwrap(),
-                                    command.args.i.unwrap(),
-                                    command.args.j.unwrap(),
-                                    ArcDirection::CCW,
-                                )))
-                                .is_err()
-                            {}
-                        } else if (command.kind, command.number) == M0 {
-                            r.MOVE_BUFFER.clear();
-                            r.CURRENT.x = None;
-                            r.CURRENT.y = None;
                         }
+                        _ => {},
                     }
                 }
             }

@@ -9,16 +9,16 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/etrombly/sandbox"
 
 [dependencies]
-stm32f103xx = "0.9.1"
-cortex-m = "0.4.3"
-cortex-m-rtfm = "0.3.2"
+stm32f103xx = "0.10.0"
+cortex-m = "0.5.7"
+cortex-m-rtfm = "0.3.4"
 nb = "0.1.1"
 m = "0.1.1"
-panic-abort = "0.1.1"
+panic-abort = "0.3.1"
 
 [dependencies.byteorder]
 default-features = false
-version = "1.2.2"
+version = "1.2.7"
 
 [dependencies.cobs]
 default-features = false
@@ -31,10 +31,6 @@ git = "https://github.com/Michael-F-Bryan/gcode-rs"
 default-features = false
 version = "0.2.2"
 
-[dependencies.embedded-hal]
-features = ["unproven"]
-version = "0.1.2"
-
 [dependencies.stm32f103xx-hal]
 git = "https://github.com/japaric/stm32f103xx-hal"
 
@@ -42,26 +38,22 @@ git = "https://github.com/japaric/stm32f103xx-hal"
 git = "https://github.com/etrombly/stepper-driver"
 
 [dev-dependencies]
-cortex-m-semihosting = "0.2.1"
-
-cortex-m-rtfm = "0.3.2"
+cortex-m-semihosting = "0.3.1"
+cortex-m-rtfm = "0.3.4"
 m = "0.1.1"
+cortex-m-rt = "0.6.5"
 
 [dev-dependencies.byteorder]
 default-features = false
-version = "1.2.2"
+version = "1.2.7"
 
 [dev-dependencies.cobs]
 default-features = false
 version = "0.1.3"
 
-[dev-dependencies.cortex-m-rt]
-#features = ["abort-on-panic"]
-version = "0.4.0"
-
 [dev-dependencies.crc16]
 default-features = false
-version = "0.3.4"
+version = "0.4.0"
 
 [dev-dependencies.either]
 default-features = false
@@ -69,7 +61,7 @@ version = "1.5.0"
 
 [dev-dependencies.stm32f103xx]
 features = ["rt"]
-version = "0.9.1"
+version = "0.10.0"
 
 [features]
 doc = []
@@ -84,3 +76,4 @@ opt-level = "z"
 [profile.release]
 debug = true
 lto = true
+codegen-units = 1
