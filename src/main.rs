@@ -1,11 +1,11 @@
-//! examples/init.rs
+//! zen garden sandbox
 
 #![deny(unsafe_code)]
 #![deny(warnings)]
 #![no_main]
 #![no_std]
 
-extern crate panic_semihosting;
+extern crate panic_abort;
 
 use cortex_m::peripheral::syst::SystClkSource;
 use gcode::Mnemonic;
@@ -43,7 +43,7 @@ const X_STEP_SIZE: f32 = 1.0 / X_STEPS_MM;
 const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max speed in mm/s
-const MAX_SPEED: f32 = 0.3;
+const MAX_SPEED: f32 = 0.01;
 const MAX_FREQ_X: u32 = (MAX_SPEED / X_STEP_SIZE) as u32;
 const MAX_FREQ_Y: u32 = (MAX_SPEED / Y_STEP_SIZE) as u32;
 // Length of linear segment for arcs
