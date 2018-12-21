@@ -10,14 +10,17 @@ repository = "https://github.com/etrombly/sandbox"
 edition = "2018"
 
 [dependencies]
-stm32f103xx = "0.11.0"
 cortex-m = "0.5.8"
 nb = "0.1.1"
-m = "0.1.1"
 cortex-m-rtfm = "0.4.0"
 panic-semihosting = "0.5.1"
 cortex-m-semihosting = "0.3.2"
 cortex-m-rt = "0.6.7"
+libm = "0.1.2"
+
+[dependencies.stm32f103xx]
+features = ["rt"]
+version = "0.11.0"
 
 [dependencies.byteorder]
 default-features = false
@@ -42,12 +45,7 @@ git = "https://github.com/etrombly/stepper-driver"
 
 [dev-dependencies]
 cortex-m-semihosting = "0.3.2"
-m = "0.1.1"
 cortex-m-rt = "0.6.7"
-
-[features]
-doc = []
-rt = ["stm32f103xx/rt"]
 
 [profile.dev]
 incremental = false

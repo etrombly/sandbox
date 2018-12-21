@@ -1,17 +1,18 @@
 //! examples/init.rs
 
 #![deny(unsafe_code)]
-//#![deny(warnings)]
+#![deny(warnings)]
 #![no_main]
 #![no_std]
 
 extern crate panic_semihosting;
 
 use cortex_m::peripheral::syst::SystClkSource;
-use cortex_m_semihosting::{debug, hprintln};
 use gcode::Mnemonic;
 use nb::block;
 use rtfm::app;
+// atan2 and sqrt
+use libm::F32Ext;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
 use stm32f103xx::Interrupt;
@@ -23,7 +24,6 @@ use stm32f103xx_hal::{
         Output, PushPull,
     },
     prelude::*,
-    rcc::RccExt,
     serial::{Rx, Serial, Tx},
     time::{Instant, MonoTimer, enable_trace},
     timer::{Timer, Event},
@@ -33,8 +33,6 @@ use stm32f103xx_hal::{
 use byteorder::{ByteOrder, LE};
 // used to convert bytes to string
 use core::str;
-// some float math that's not in core
-use m::Float as _0;
 
 const CARRIAGE_RETURN: u8 = 13;
 const NEW_LINE: u8 = 10;
@@ -45,7 +43,7 @@ const X_STEP_SIZE: f32 = 1.0 / X_STEPS_MM;
 const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max speed in mm/s
-const MAX_SPEED: f32 = 0.6;
+const MAX_SPEED: f32 = 0.3;
 const MAX_FREQ_X: u32 = (MAX_SPEED / X_STEP_SIZE) as u32;
 const MAX_FREQ_Y: u32 = (MAX_SPEED / Y_STEP_SIZE) as u32;
 // Length of linear segment for arcs
@@ -56,30 +54,6 @@ const RX_SZ: usize = 256;
 
 // number of moves to buffer
 const MOVE_SZ: usize = 256;
-
-trait Util {
-    fn powi(&self, exp: i32) -> f32;
-    fn abs(&self) -> f32;
-}
-
-impl Util for f32 {
-    // TODO: this should have overflow checking
-    fn powi(&self, exp: i32) -> f32 {
-        let mut tmp = *self;
-        for _ in 1..exp {
-            tmp = tmp * self;
-        }
-        tmp
-    }
-
-    fn abs(&self) -> f32 {
-        if self < &0_f32 {
-            -(*self)
-        } else {
-            *self
-        }
-    }
-}
 
 // TODO: put the structs in a lib
 // Movebuffer holds all movements parsed from gcode
@@ -251,7 +225,7 @@ impl ArcMove {
     ) -> ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
-        let radius = ((curr_x - center_x).powi(2) + (curr_y - center_y).powi(2)).sqrt();
+        let radius = ((curr_x - center_x).powf(2.0) + (curr_y - center_y).powf(2.0)).sqrt();
         let r_x = -i;
         let r_y = -j;
         let rt_x = end_x - center_x;
@@ -274,10 +248,9 @@ impl ArcMove {
 
         let mm_of_travel = (angular_travel * radius).abs();
 
-        // double cast is a cheater floor()
-        let segments = (mm_of_travel / MM_PER_ARC_SEGMENT) as u32 as f32;
+        let segments = (mm_of_travel / MM_PER_ARC_SEGMENT).floor();
         let sin_t = angular_travel / segments;
-        let cos_t = 1.0 - 0.5 * (sin_t).powi(2); // Small angle approximation
+        let cos_t = 1.0 - 0.5 * (sin_t).powf(2.0); // Small angle approximation
 
         ArcMove {
             end_x,
@@ -355,6 +328,7 @@ const APP: () = {
   static mut TIMER_X: Timer<stm32f103xx::TIM2> = ();
   static mut TIMER_Y: Timer<stm32f103xx::TIM3> = ();
   static mut TX: TX = ();
+  static mut RX: RX = ();
   static mut LAST_UPDATE: Instant = ();
   // monotimer for cpu monitor
   static MONO: MonoTimer = ();
@@ -442,6 +416,7 @@ const APP: () = {
         LAST_UPDATE = mono.now();
         MONO = mono;
         TX = tx;
+        RX = rx;
     }
 
     #[idle(resources = [MONO, SLEEP])]
@@ -633,12 +608,79 @@ const APP: () = {
     }
 }
 
-    //#[interrupt]
-    //fn TIM2() {}
+    #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X])]
+    fn TIM2() {
+        if let Some(x) = resources.CURRENT.x {
+            if x > 0.0 {
+                resources.STEPPER_X.step();
+                resources.CURRENT.x = Some(x - X_STEP_SIZE);
+                match resources.STEPPER_X.direction {
+                    Direction::CW => resources.LOCATION.x += X_STEP_SIZE,
+                    _ => resources.LOCATION.x -= X_STEP_SIZE,
+                }
+            } else {
+                resources.CURRENT.x = None;
+            }
+        } else {
+            resources.STEPPER_X.disable();
+        }
 
-    //#[interrupt]
-    //fn TIM3() {}
+        if resources.TIMER_X.wait().is_err() {
+            //interrupts probably disabled
+        }
+    }
 
-    //#[interrupt]
-    //fn USART1() {}
+    #[interrupt(resources=[CURRENT,LOCATION, STEPPER_Y, TIMER_Y])]
+    fn TIM3() {
+        if let Some(y) = resources.CURRENT.y {
+            if y > 0.0 {
+                resources.STEPPER_Y.step();
+                resources.CURRENT.y = Some(y - Y_STEP_SIZE);
+                match resources.STEPPER_Y.direction {
+                    Direction::CW => resources.LOCATION.y += Y_STEP_SIZE,
+                    _ => resources.LOCATION.y -= Y_STEP_SIZE,
+                }
+            } else {
+                resources.CURRENT.y = None;
+            }
+        } else {
+            resources.STEPPER_Y.disable();
+        }
+
+        if resources.TIMER_Y.wait().is_err() {
+            //interrupts probably disabled
+        }
+    }
+
+    #[interrupt(resources=[RX,RX_BUF,TX])]
+    fn USART1() {
+        // Read each character from serial as it comes in
+        match resources.RX.read() {
+            Ok(c) => {
+                // TODO: handle buffer being full
+                if resources.RX_BUF.push(&c).is_ok() {}
+            }
+            Err(e) => {
+                match e {
+                    nb::Error::WouldBlock => {
+                        for c in b"blocking\r\n" {
+                            block!(resources.TX.write(*c)).ok();
+                        }
+                    }
+                    // currently no way to easily clear the overrun flag, if you hit this
+                    // it'll be stuck here
+                    nb::Error::Other(stm32f103xx_hal::serial::Error::Overrun) => {
+                        for c in b"overrun error\r\n" {
+                            block!(resources.TX.write(*c)).ok();
+                        }
+                    }
+                    _ => {
+                        for c in b"other error\r\n" {
+                            block!(resources.TX.write(*c)).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
 };
