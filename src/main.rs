@@ -17,7 +17,7 @@ use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
 use stm32f103xx::Interrupt;
 use stm32f103xx_hal::{
-    flash::FlashExt,
+    //flash::FlashExt,
     gpio::{
         gpioa::{PA1, PA2, PA3, PA4},
         gpiob::{PB5, PB6, PB7, PB8},
@@ -25,8 +25,8 @@ use stm32f103xx_hal::{
     },
     prelude::*,
     serial::{Rx, Serial, Tx},
-    time::{Instant, MonoTimer, enable_trace},
-    timer::{Timer, Event},
+    time::{enable_trace, Instant, MonoTimer},
+    timer::{Event, Timer},
 };
 
 // used for encoding data to send over serial
@@ -127,9 +127,9 @@ impl Buffer {
         }
     }
 
-    pub fn push(&mut self, data: &u8) -> Result<(), ()> {
+    pub fn push(&mut self, data: u8) -> Result<(), ()> {
         if self.index < RX_SZ {
-            self.buffer[self.index] = *data;
+            self.buffer[self.index] = data;
             self.index += 1;
             return Ok(());
         }
@@ -159,11 +159,11 @@ impl Buffer {
             let mut remainder = Buffer::new();
             for c in &self.buffer[0..index] {
                 // TODO: handle error here
-                if line.push(c).is_err() {}
+                if line.push(*c).is_err() {}
             }
             for c in &self.buffer[index + 1..self.index] {
                 // TODO: handle error here
-                if remainder.push(c).is_err() {}
+                if remainder.push(*c).is_err() {}
             }
             Some((line, remainder))
         } else {
@@ -185,9 +185,9 @@ pub struct LinearMove {
 }
 
 impl LinearMove {
-  pub const fn new() -> LinearMove {
-    LinearMove{x: None, y: None}
-  }
+    pub const fn new() -> LinearMove {
+        LinearMove { x: None, y: None }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -314,25 +314,25 @@ type STEPPER_Y = Stepper<
 
 #[app(device = stm32f103xx)]
 const APP: () = {
-  // linear move that is active
-  static mut CURRENT: LinearMove = LinearMove::new();
-  static mut RX_BUF: Buffer = Buffer::new();
-  static mut CMD_BUF: Buffer = Buffer::new();
-  static mut MOVE_BUFFER: MoveBuffer = MoveBuffer::new();
-  // current location
-  static mut LOCATION: Point = Point{x: 0.0, y: 0.0};
-  // location once moves are processed (used for adding an arc movement)
-  static mut VIRT_LOCATION: Point = Point{x: 0.0, y: 0.0};
-  static mut STEPPER_X: STEPPER_X = ();
-  static mut STEPPER_Y: STEPPER_Y = ();
-  static mut TIMER_X: Timer<stm32f103xx::TIM2> = ();
-  static mut TIMER_Y: Timer<stm32f103xx::TIM3> = ();
-  static mut TX: TX = ();
-  static mut RX: RX = ();
-  static mut LAST_UPDATE: Instant = ();
-  // monotimer for cpu monitor
-  static MONO: MonoTimer = ();
-  static mut SLEEP: u32 = 0;
+    // linear move that is active
+    static mut CURRENT: LinearMove = LinearMove::new();
+    static mut RX_BUF: Buffer = Buffer::new();
+    static mut CMD_BUF: Buffer = Buffer::new();
+    static mut MOVE_BUFFER: MoveBuffer = MoveBuffer::new();
+    // current location
+    static mut LOCATION: Point = Point { x: 0.0, y: 0.0 };
+    // location once moves are processed (used for adding an arc movement)
+    static mut VIRT_LOCATION: Point = Point { x: 0.0, y: 0.0 };
+    static mut STEPPER_X: STEPPER_X = ();
+    static mut STEPPER_Y: STEPPER_Y = ();
+    static mut TIMER_X: Timer<stm32f103xx::TIM2> = ();
+    static mut TIMER_Y: Timer<stm32f103xx::TIM3> = ();
+    static mut TX: TX = ();
+    static mut RX: RX = ();
+    static mut LAST_UPDATE: Instant = ();
+    // monotimer for cpu monitor
+    static MONO: MonoTimer = ();
+    static mut SLEEP: u32 = 0;
 
     #[init]
     fn init() {
@@ -421,192 +421,191 @@ const APP: () = {
 
     #[idle(resources = [MONO, SLEEP])]
     fn idle() -> ! {
-      loop {
-        let before = resources.MONO.now();
-        wfi();
-        resources.SLEEP.lock(|sleep|
-          *sleep += before.elapsed()
-        );
-        rtfm::pend(Interrupt::TIM2);
-        rtfm::pend(Interrupt::TIM3);
-        rtfm::pend(Interrupt::USART1);
-      }
+        loop {
+            let before = resources.MONO.now();
+            wfi();
+            resources.SLEEP.lock(|sleep| *sleep += before.elapsed());
+            rtfm::pend(Interrupt::TIM2);
+            rtfm::pend(Interrupt::TIM3);
+            rtfm::pend(Interrupt::USART1);
+        }
     }
 
     #[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y, LAST_UPDATE, MONO])]
     fn SysTick() {
-    // check if any commands have been received, if so process the gcode
-    // TODO: this currently isn't fast enough to keep up if batches of commands are sent
-    if let Some(data) = resources.RX_BUF.read() {
-        // add the data to the command buffer
-        for c in &data.buffer[0..data.index] {
-            // TODO: handle error here
-            if resources.CMD_BUF.push(c).is_err() {}
-        }
-        // if any lines have been received, process them
-        while let Some((line, buffer)) = resources.CMD_BUF.split() {
-            *resources.CMD_BUF = buffer;
-            if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
-                for line in gcode::parse(&gcode) {
-                    match line.mnemonic() {
-                        Mnemonic::General => {
-                            match line.major_number() {
-                                0 | 1 => {
-                                    // TODO: Handle the buffer being full
-                                    if resources.MOVE_BUFFER
-                                        .push(&Movement::LinearMove(LinearMove {
-                                            x: line.value_for('x'),
-                                            y: line.value_for('y'),
-                                        }))
-                                        .is_err()
-                                    {
-                                    } else {
-                                        *resources.VIRT_LOCATION = Point {
-                                            x: line.value_for('x').unwrap(),
-                                            y: line.value_for('y').unwrap(),
-                                        };
+        // check if any commands have been received, if so process the gcode
+        // TODO: this currently isn't fast enough to keep up if batches of commands are sent
+        if let Some(data) = resources.RX_BUF.read() {
+            // add the data to the command buffer
+            for c in &data.buffer[0..data.index] {
+                // TODO: handle error here
+                if resources.CMD_BUF.push(*c).is_err() {}
+            }
+            // if any lines have been received, process them
+            while let Some((line, buffer)) = resources.CMD_BUF.split() {
+                *resources.CMD_BUF = buffer;
+                if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
+                    for line in gcode::parse(&gcode) {
+                        match line.mnemonic() {
+                            Mnemonic::General => {
+                                match line.major_number() {
+                                    0 | 1 => {
+                                        // TODO: Handle the buffer being full
+                                        if resources
+                                            .MOVE_BUFFER
+                                            .push(&Movement::LinearMove(LinearMove {
+                                                x: line.value_for('x'),
+                                                y: line.value_for('y'),
+                                            }))
+                                            .is_err()
+                                        {
+                                        } else {
+                                            *resources.VIRT_LOCATION = Point {
+                                                x: line.value_for('x').unwrap(),
+                                                y: line.value_for('y').unwrap(),
+                                            };
+                                        }
                                     }
-                                },
-                                // TODO: if path planning is going to be added arcs should be converted in to linear moves here
-                                2 => {
-                                    if resources.MOVE_BUFFER
-                                        .push(&Movement::ArcMove(ArcMove::new(
-                                            resources.VIRT_LOCATION.x,
-                                            resources.VIRT_LOCATION.y,
-                                            line.value_for('x').unwrap(),
-                                            line.value_for('y').unwrap(),
-                                            line.value_for('i').unwrap(),
-                                            line.value_for('j').unwrap(),
-                                            ArcDirection::CW,
-                                        )))
-                                        .is_err()
-                                    {
-                                    } else {
-                                        *resources.VIRT_LOCATION = Point {
-                                            x: line.value_for('x').unwrap(),
-                                            y: line.value_for('y').unwrap(),
-                                        };
+                                    // TODO: if path planning is going to be added arcs should be converted in to linear moves here
+                                    2 => {
+                                        if resources
+                                            .MOVE_BUFFER
+                                            .push(&Movement::ArcMove(ArcMove::new(
+                                                resources.VIRT_LOCATION.x,
+                                                resources.VIRT_LOCATION.y,
+                                                line.value_for('x').unwrap(),
+                                                line.value_for('y').unwrap(),
+                                                line.value_for('i').unwrap(),
+                                                line.value_for('j').unwrap(),
+                                                ArcDirection::CW,
+                                            )))
+                                            .is_err()
+                                        {
+                                        } else {
+                                            *resources.VIRT_LOCATION = Point {
+                                                x: line.value_for('x').unwrap(),
+                                                y: line.value_for('y').unwrap(),
+                                            };
+                                        }
                                     }
-                                },
-                                3 => {
-                                    if resources.MOVE_BUFFER
-                                        .push(&Movement::ArcMove(ArcMove::new(
-                                            resources.LOCATION.x,
-                                            resources.LOCATION.y,
-                                            line.value_for('x').unwrap(),
-                                            line.value_for('y').unwrap(),
-                                            line.value_for('i').unwrap(),
-                                            line.value_for('j').unwrap(),
-                                            ArcDirection::CCW,
-                                        )))
-                                        .is_err()
-                                    {}
-                                },
-                                _ => {},
+                                    3 => {
+                                        if resources
+                                            .MOVE_BUFFER
+                                            .push(&Movement::ArcMove(ArcMove::new(
+                                                resources.LOCATION.x,
+                                                resources.LOCATION.y,
+                                                line.value_for('x').unwrap(),
+                                                line.value_for('y').unwrap(),
+                                                line.value_for('i').unwrap(),
+                                                line.value_for('j').unwrap(),
+                                                ArcDirection::CCW,
+                                            )))
+                                            .is_err()
+                                        {}
+                                    }
+                                    _ => {}
+                                }
                             }
-                        },
-                        Mnemonic::Miscellaneous => {
-                            match line.major_number() {
+                            Mnemonic::Miscellaneous => match line.major_number() {
                                 0 => {
                                     resources.MOVE_BUFFER.clear();
                                     resources.CURRENT.x = None;
                                     resources.CURRENT.y = None;
-                                },
-                                _ => {},
-                            }
+                                }
+                                _ => {}
+                            },
+                            _ => {}
                         }
-                        _ => {},
                     }
                 }
             }
         }
-    }
 
-    // check if current move is done
-    if resources.CURRENT.x.is_none() && resources.CURRENT.y.is_none() {
-        // if it is try to grab a move off the buffer
-        if let Some(new_move) = resources.MOVE_BUFFER.next() {
-            match new_move.x {
-                // if there's an x movement set the direction and make the movement positive
-                Some(x) => {
-                    let next = x - resources.LOCATION.x;
-                    if next > 0.0 {
-                        resources.STEPPER_X.direction(Direction::CW);
-                    } else {
-                        resources.STEPPER_X.direction(Direction::CCW);
+        // check if current move is done
+        if resources.CURRENT.x.is_none() && resources.CURRENT.y.is_none() {
+            // if it is try to grab a move off the buffer
+            if let Some(new_move) = resources.MOVE_BUFFER.next() {
+                match new_move.x {
+                    // if there's an x movement set the direction and make the movement positive
+                    Some(x) => {
+                        let next = x - resources.LOCATION.x;
+                        if next > 0.0 {
+                            resources.STEPPER_X.direction(Direction::CW);
+                        } else {
+                            resources.STEPPER_X.direction(Direction::CCW);
+                        }
+                        resources.CURRENT.x = Some((next).abs());
+                        resources.TIMER_X.listen(Event::Update);
                     }
-                    resources.CURRENT.x = Some((next).abs());
-                    resources.TIMER_X.listen(Event::Update);
-                }
-                // if there isn't a move disable the stepper
-                None => {
-                    resources.CURRENT.x = None;
-                    resources.TIMER_X.unlisten(Event::Update);
-                }
-            }
-            match new_move.y {
-                // if there's an y movement set the direction and make the movement positive
-                Some(y) => {
-                    let next = y - resources.LOCATION.y;
-                    if next > 0.0 {
-                        resources.STEPPER_Y.direction(Direction::CW);
-                    } else {
-                        resources.STEPPER_Y.direction(Direction::CCW);
+                    // if there isn't a move disable the stepper
+                    None => {
+                        resources.CURRENT.x = None;
+                        resources.TIMER_X.unlisten(Event::Update);
                     }
-                    resources.CURRENT.y = Some((next).abs());
-                    resources.TIMER_Y.listen(Event::Update);
                 }
-                // if there isn't a move disable the stepper
-                None => {
-                    resources.CURRENT.y = None;
-                    resources.TIMER_Y.unlisten(Event::Update);
+                match new_move.y {
+                    // if there's an y movement set the direction and make the movement positive
+                    Some(y) => {
+                        let next = y - resources.LOCATION.y;
+                        if next > 0.0 {
+                            resources.STEPPER_Y.direction(Direction::CW);
+                        } else {
+                            resources.STEPPER_Y.direction(Direction::CCW);
+                        }
+                        resources.CURRENT.y = Some((next).abs());
+                        resources.TIMER_Y.listen(Event::Update);
+                    }
+                    // if there isn't a move disable the stepper
+                    None => {
+                        resources.CURRENT.y = None;
+                        resources.TIMER_Y.unlisten(Event::Update);
+                    }
                 }
-            }
 
-            match (resources.CURRENT.x, resources.CURRENT.y) {
-                // TODO: test why these aren't matching up on longer moves
-                // TODO: handle x or y being zero
-                // calculate the stepper speeds so that x and y movement end at the same time
-                // (linear interpolation)
-                (Some(_x), None) => {
-                    resources.TIMER_X.start(MAX_FREQ_X.hz());
-                }
-                (None, Some(_y)) => {
-                    resources.TIMER_Y.start(MAX_FREQ_Y.hz());
-                }
-                (Some(x), Some(y)) => {
-                    if x > y {
-                        let freq = MAX_FREQ_Y / (x / y) as u32 + 1;
+                match (resources.CURRENT.x, resources.CURRENT.y) {
+                    // TODO: test why these aren't matching up on longer moves
+                    // TODO: handle x or y being zero
+                    // calculate the stepper speeds so that x and y movement end at the same time
+                    // (linear interpolation)
+                    (Some(_x), None) => {
                         resources.TIMER_X.start(MAX_FREQ_X.hz());
-                        resources.TIMER_Y.start(freq.hz());
-                    } else {
-                        let freq = MAX_FREQ_X / (y / x) as u32 + 1;
-                        resources.TIMER_X.start(freq.hz());
+                    }
+                    (None, Some(_y)) => {
                         resources.TIMER_Y.start(MAX_FREQ_Y.hz());
                     }
+                    (Some(x), Some(y)) => {
+                        if x > y {
+                            let freq = MAX_FREQ_Y / (x / y) as u32 + 1;
+                            resources.TIMER_X.start(MAX_FREQ_X.hz());
+                            resources.TIMER_Y.start(freq.hz());
+                        } else {
+                            let freq = MAX_FREQ_X / (y / x) as u32 + 1;
+                            resources.TIMER_X.start(freq.hz());
+                            resources.TIMER_Y.start(MAX_FREQ_Y.hz());
+                        }
+                    }
+                    _ => {}
                 }
-                _ => {}
+            }
+        }
+
+        // send performance info once a second
+        // TODO: figure out a good interval, 1 second may be too long to be useful
+        if resources.LAST_UPDATE.elapsed() > 32_000_000 {
+            *resources.LAST_UPDATE = resources.MONO.now();
+            // write the cpu monitoring data out
+            let mut data = [0; 12];
+            let mut buf: [u8; 13] = [0; 13];
+            LE::write_u32(&mut data[0..4], *resources.SLEEP);
+            LE::write_f32(&mut data[4..8], resources.LOCATION.x);
+            LE::write_f32(&mut data[8..12], resources.LOCATION.y);
+            cobs::encode(&data, &mut buf);
+            *resources.SLEEP = 0;
+            for byte in &buf {
+                block!(resources.TX.write(*byte)).ok();
             }
         }
     }
-
-    // send performance info once a second
-    // TODO: figure out a good interval, 1 second may be too long to be useful
-    if resources.LAST_UPDATE.elapsed() > 32_000_000 {
-        *resources.LAST_UPDATE = resources.MONO.now();
-        // write the cpu monitoring data out
-        let mut data = [0; 12];
-        let mut buf: [u8; 13] = [0; 13];
-        LE::write_u32(&mut data[0..4], *resources.SLEEP);
-        LE::write_f32(&mut data[4..8], resources.LOCATION.x);
-        LE::write_f32(&mut data[8..12], resources.LOCATION.y);
-        cobs::encode(&data, &mut buf);
-        *resources.SLEEP = 0;
-        for byte in &buf {
-            block!(resources.TX.write(*byte)).ok();
-        }
-    }
-}
 
     #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X])]
     fn TIM2() {
@@ -658,7 +657,7 @@ const APP: () = {
         match resources.RX.read() {
             Ok(c) => {
                 // TODO: handle buffer being full
-                if resources.RX_BUF.push(&c).is_ok() {}
+                if resources.RX_BUF.push(c).is_ok() {}
             }
             Err(e) => {
                 match e {
