@@ -1,7 +1,7 @@
 //! zen garden sandbox
 
 #![deny(unsafe_code)]
-#![deny(warnings)]
+//#![deny(warnings)]
 #![no_main]
 #![no_std]
 
@@ -15,8 +15,8 @@ use rtfm::app;
 use libm::F32Ext;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
-use stm32f103xx::Interrupt;
-use stm32f103xx_hal::{
+use stm32f4::stm32f407::Interrupt;
+use stm32f4xx_hal::{
     //flash::FlashExt,
     gpio::{
         gpioa::{PA1, PA2, PA3, PA4},
@@ -25,7 +25,7 @@ use stm32f103xx_hal::{
     },
     prelude::*,
     serial::{Rx, Serial, Tx},
-    time::{enable_trace, Instant, MonoTimer},
+    //time::{enable_trace, Instant, MonoTimer},
     timer::{Event, Timer},
 };
 
@@ -289,8 +289,8 @@ pub enum Movement {
 
 // CONNECTIONS
 // serial tx and rx
-type TX = Tx<stm32f103xx::USART1>;
-type RX = Rx<stm32f103xx::USART1>;
+type TX = Tx<stm32f4::stm32f407::USART1>;
+type RX = Rx<stm32f4::stm32f407::USART1>;
 
 // the first stepper is connected to a ULN2003 on pins PA1-4
 #[allow(non_camel_case_types)]
@@ -312,7 +312,7 @@ type STEPPER_Y = Stepper<
     ULN2003,
 >;
 
-#[app(device = stm32f103xx)]
+#[app(device = stm32f4::stm32f407)]
 const APP: () = {
     // linear move that is active
     static mut CURRENT: LinearMove = LinearMove::new();
@@ -325,20 +325,20 @@ const APP: () = {
     static mut VIRT_LOCATION: Point = Point { x: 0.0, y: 0.0 };
     static mut STEPPER_X: STEPPER_X = ();
     static mut STEPPER_Y: STEPPER_Y = ();
-    static mut TIMER_X: Timer<stm32f103xx::TIM2> = ();
-    static mut TIMER_Y: Timer<stm32f103xx::TIM3> = ();
+    static mut TIMER_X: Timer<stm32f4::stm32f407::TIM2> = ();
+    static mut TIMER_Y: Timer<stm32f4::stm32f407::TIM3> = ();
     static mut TX: TX = ();
     static mut RX: RX = ();
-    static mut LAST_UPDATE: Instant = ();
+    //static mut LAST_UPDATE: Instant = ();
     // monotimer for cpu monitor
-    static MONO: MonoTimer = ();
+    //static MONO: MonoTimer = ();
     static mut SLEEP: u32 = 0;
 
     #[init]
     fn init() {
-        let device: stm32f103xx::Peripherals = device;
+        let device: stm32f4::stm32f407::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
-        let mut flash = device.FLASH.constrain();
+        //let mut flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
 
         // TODO: test performance and see what this needs to actually be set to
@@ -346,11 +346,12 @@ const APP: () = {
             .cfgr
             .sysclk(64.mhz())
             .pclk1(32.mhz())
-            .freeze(&mut flash.acr);
+            //.freeze(&mut flash.acr);
+            .freeze();
 
-        let trace = enable_trace(core.DCB);
+        //let trace = enable_trace(core.DCB);
         // start timer for performance monitoring
-        let mono = MonoTimer::new(core.DWT, trace, clocks);
+        //let mono = MonoTimer::new(core.DWT, trace, clocks);
 
         // configure the system timer
         // TODO: test performance and see what this needs to actually be set to
@@ -362,46 +363,51 @@ const APP: () = {
         // These timers are used to control the step speed of the steppers
         // the initial update freq doesn't matter since they won't start until a move is received
         // just don't set to 0hz
-        let tim2 = Timer::tim2(device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
-        let tim3 = Timer::tim3(device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
+        let tim2 = Timer::tim2(device.TIM2, 1.hz(), clocks);
+        let tim3 = Timer::tim3(device.TIM3, 1.hz(), clocks);
 
-        let mut afio = device.AFIO.constrain(&mut rcc.apb2);
+        //let mut afio = device.AFIO.constrain(&mut rcc.apb2);
 
-        let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
-        let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
+        let mut gpioa = device.GPIOA.split();
+        let mut gpiob = device.GPIOB.split();
 
         // SERIAL
-        let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
-        let pa10 = gpioa.pa10;
+        let pa9 = gpioa.pa9.into_alternate_af7();
+        let pa10 = gpioa.pa10.into_alternate_af7();
+
+        let config = stm32f4xx_hal::serial::config::Config {
+            baudrate: 115_200.bps(),
+            wordlength: stm32f4xx_hal::serial::config::WordLength::DataBits8,
+            parity: stm32f4xx_hal::serial::config::Parity::ParityNone,
+            stopbits: stm32f4xx_hal::serial::config::StopBits::STOP1,
+        };
 
         let mut serial = Serial::usart1(
             device.USART1,
             (pa9, pa10),
-            &mut afio.mapr,
-            115_200.bps(),
+            config,
             clocks,
-            &mut rcc.apb2,
-        );
+        ).unwrap();
 
         // Enable RX interrupt
-        serial.listen(stm32f103xx_hal::serial::Event::Rxne);
+        serial.listen(stm32f4xx_hal::serial::Event::Rxne);
 
         let (mut tx, rx) = serial.split();
 
         let stepper_x = Stepper::uln2003(
             Direction::CW,
-            gpioa.pa1.into_push_pull_output(&mut gpioa.crl),
-            gpioa.pa2.into_push_pull_output(&mut gpioa.crl),
-            gpioa.pa3.into_push_pull_output(&mut gpioa.crl),
-            gpioa.pa4.into_push_pull_output(&mut gpioa.crl),
+            gpioa.pa1.into_push_pull_output(),
+            gpioa.pa2.into_push_pull_output(),
+            gpioa.pa3.into_push_pull_output(),
+            gpioa.pa4.into_push_pull_output(),
         );
 
         let stepper_y = Stepper::uln2003(
             Direction::CW,
-            gpiob.pb5.into_push_pull_output(&mut gpiob.crl),
-            gpiob.pb6.into_push_pull_output(&mut gpiob.crl),
-            gpiob.pb7.into_push_pull_output(&mut gpiob.crl),
-            gpiob.pb8.into_push_pull_output(&mut gpiob.crh),
+            gpiob.pb5.into_push_pull_output(),
+            gpiob.pb6.into_push_pull_output(),
+            gpiob.pb7.into_push_pull_output(),
+            gpiob.pb8.into_push_pull_output(),
         );
 
         // TODO: look in to changing serial TX back to DMA
@@ -413,25 +419,27 @@ const APP: () = {
         STEPPER_Y = stepper_y;
         TIMER_X = tim2;
         TIMER_Y = tim3;
-        LAST_UPDATE = mono.now();
-        MONO = mono;
+        //LAST_UPDATE = mono.now();
+        //MONO = mono;
         TX = tx;
         RX = rx;
     }
 
-    #[idle(resources = [MONO, SLEEP])]
+    //#[idle(resources = [MONO, SLEEP])]
+    #[idle(resources = [SLEEP])]
     fn idle() -> ! {
         loop {
-            let before = resources.MONO.now();
+            //let before = resources.MONO.now();
             wfi();
-            resources.SLEEP.lock(|sleep| *sleep += before.elapsed());
+            //resources.SLEEP.lock(|sleep| *sleep += before.elapsed());
             rtfm::pend(Interrupt::TIM2);
             rtfm::pend(Interrupt::TIM3);
             rtfm::pend(Interrupt::USART1);
         }
     }
 
-    #[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y, LAST_UPDATE, MONO])]
+    //#[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y, LAST_UPDATE, MONO])]
+    #[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y])]
     fn SysTick() {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
@@ -535,12 +543,12 @@ const APP: () = {
                             resources.STEPPER_X.direction(Direction::CCW);
                         }
                         resources.CURRENT.x = Some((next).abs());
-                        resources.TIMER_X.listen(Event::Update);
+                        resources.TIMER_X.listen(Event::TimeOut);
                     }
                     // if there isn't a move disable the stepper
                     None => {
                         resources.CURRENT.x = None;
-                        resources.TIMER_X.unlisten(Event::Update);
+                        resources.TIMER_X.unlisten(Event::TimeOut);
                     }
                 }
                 match new_move.y {
@@ -553,12 +561,12 @@ const APP: () = {
                             resources.STEPPER_Y.direction(Direction::CCW);
                         }
                         resources.CURRENT.y = Some((next).abs());
-                        resources.TIMER_Y.listen(Event::Update);
+                        resources.TIMER_Y.listen(Event::TimeOut);
                     }
                     // if there isn't a move disable the stepper
                     None => {
                         resources.CURRENT.y = None;
-                        resources.TIMER_Y.unlisten(Event::Update);
+                        resources.TIMER_Y.unlisten(Event::TimeOut);
                     }
                 }
 
@@ -591,20 +599,20 @@ const APP: () = {
 
         // send performance info once a second
         // TODO: figure out a good interval, 1 second may be too long to be useful
-        if resources.LAST_UPDATE.elapsed() > 32_000_000 {
-            *resources.LAST_UPDATE = resources.MONO.now();
-            // write the cpu monitoring data out
-            let mut data = [0; 12];
-            let mut buf: [u8; 13] = [0; 13];
-            LE::write_u32(&mut data[0..4], *resources.SLEEP);
-            LE::write_f32(&mut data[4..8], resources.LOCATION.x);
-            LE::write_f32(&mut data[8..12], resources.LOCATION.y);
-            cobs::encode(&data, &mut buf);
-            *resources.SLEEP = 0;
-            for byte in &buf {
-                block!(resources.TX.write(*byte)).ok();
-            }
-        }
+        //if resources.LAST_UPDATE.elapsed() > 32_000_000 {
+        //    *resources.LAST_UPDATE = resources.MONO.now();
+        //    // write the cpu monitoring data out
+        //    let mut data = [0; 12];
+        //    let mut buf: [u8; 13] = [0; 13];
+        //    LE::write_u32(&mut data[0..4], *resources.SLEEP);
+        //    LE::write_f32(&mut data[4..8], resources.LOCATION.x);
+        //    LE::write_f32(&mut data[8..12], resources.LOCATION.y);
+        //    cobs::encode(&data, &mut buf);
+        //    *resources.SLEEP = 0;
+        //    for byte in &buf {
+        //        block!(resources.TX.write(*byte)).ok();
+        //    }
+        //}
     }
 
     #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X])]
@@ -668,7 +676,7 @@ const APP: () = {
                     }
                     // currently no way to easily clear the overrun flag, if you hit this
                     // it'll be stuck here
-                    nb::Error::Other(stm32f103xx_hal::serial::Error::Overrun) => {
+                    nb::Error::Other(stm32f4xx_hal::serial::Error::Overrun) => {
                         for c in b"overrun error\r\n" {
                             block!(resources.TX.write(*c)).ok();
                         }
