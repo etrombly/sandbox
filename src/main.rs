@@ -335,7 +335,7 @@ const APP: () = {
     static mut SLEEP: u32 = 0;
 
     #[init]
-    fn init() {
+    fn init() -> init::LateResources {
         let device: stm32f4::stm32f407::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
         //let mut flash = device.FLASH.constrain();
@@ -415,14 +415,16 @@ const APP: () = {
             block!(tx.write(*c)).ok();
         }
 
-        STEPPER_X = stepper_x;
-        STEPPER_Y = stepper_y;
-        TIMER_X = tim2;
-        TIMER_Y = tim3;
-        //LAST_UPDATE = mono.now();
-        //MONO = mono;
-        TX = tx;
-        RX = rx;
+        init::LateResources {
+            STEPPER_X: stepper_x,
+            STEPPER_Y: stepper_y,
+            TIMER_X: tim2,
+            TIMER_Y: tim3,
+            //LAST_UPDATE: mono.now(),
+            //MONO: mono,
+            TX: tx,
+            RX: rx,
+        }
     }
 
     //#[idle(resources = [MONO, SLEEP])]
