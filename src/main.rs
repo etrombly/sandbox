@@ -346,7 +346,7 @@ const APP: () = {
     static mut SLEEP: u32 = 0;
 
     #[init]
-    fn init() {
+    fn init() -> init::LateResources {
         let device: stm32f1::stm32f103::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
         let mut flash = device.FLASH.constrain();
@@ -415,18 +415,20 @@ const APP: () = {
         );
 
         // TODO: look in to changing serial TX back to DMA
-        for c in b"initialized\r\n" {
+        for c in b"\r\ninitialized\r\n" {
             block!(tx.write(*c)).ok();
         }
 
-        STEPPER_X = stepper_x;
-        STEPPER_Y = stepper_y;
-        TIMER_X = tim2;
-        TIMER_Y = tim3;
-        LAST_UPDATE = mono.now();
-        MONO = mono;
-        TX = tx;
-        RX = rx;
+        init::LateResources {
+            STEPPER_X: stepper_x,
+            STEPPER_Y: stepper_y,
+            TIMER_X: tim2,
+            TIMER_Y: tim3,
+            LAST_UPDATE: mono.now(),
+            MONO: mono,
+            TX: tx,
+            RX: rx,
+        }
     }
 
     #[idle(resources = [MONO, SLEEP])]
@@ -446,6 +448,8 @@ const APP: () = {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
         if let Some(data) = resources.RX_BUF.read() {
+            let mut stdout = hio::hstdout().unwrap();
+            write!(stdout, "recieved data\n").unwrap();
             // add the data to the command buffer
             for c in &data.buffer[0..data.index] {
                 // TODO: handle error here
@@ -454,12 +458,20 @@ const APP: () = {
             // if any lines have been received, process them
             while let Some((line, buffer)) = resources.CMD_BUF.split() {
                 *resources.CMD_BUF = buffer;
+                let mut stdout = hio::hstdout().unwrap();
+                write!(stdout, "processing line\n").unwrap();
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
+                    let mut stdout = hio::hstdout().unwrap();
+                    write!(stdout, "gcode ok\n").unwrap();
                     for line in gcode::parse(gcode) {
+                        let mut stdout = hio::hstdout().unwrap();
+                        write!(stdout, "gcode parsed\n").unwrap();
                         match line.mnemonic() {
                             Mnemonic::General => {
                                 match line.major_number() {
                                     0 | 1 => {
+                                        let mut stdout = hio::hstdout().unwrap();
+                                        write!(stdout, "G0 or G1\n").unwrap();
                                         // TODO: Handle the buffer being full
                                         if resources
                                             .MOVE_BUFFER
@@ -602,6 +614,7 @@ const APP: () = {
                         write!(stdout, "in x\n").unwrap();
 
                         resources.TIMER_X.start(MAX_FREQ_X.hz());
+                        write!(stdout, "out of x\n").unwrap();
                     }
                     (None, Some(_y)) => {
                         let mut stdout = hio::hstdout().unwrap();
@@ -656,6 +669,8 @@ const APP: () = {
     fn TIM2() {
         if let Some(x) = resources.CURRENT.x {
             if x > 0.0 {
+                let mut stdout = hio::hstdout().unwrap();
+                            write!(stdout, "stepping {}\n", x).unwrap();
                 resources.STEPPER_X.step();
                 resources.CURRENT.x = Some(x - X_STEP_SIZE);
                 match resources.STEPPER_X.direction {
