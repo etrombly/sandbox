@@ -5,7 +5,7 @@
 #![no_main]
 #![no_std]
 
-extern crate panic_abort;
+extern crate panic_semihosting;
 
 use cortex_m::peripheral::syst::SystClkSource;
 use gcode::Mnemonic;
@@ -19,7 +19,7 @@ use stm32f4::stm32f407::Interrupt;
 use stm32f4xx_hal::{
     //flash::FlashExt,
     gpio::{
-        gpioa::{PA1, PA2, PA3, PA4},
+        gpioa::{PA1, PA2, PA3, PA4, PA6},
         gpiob::{PB5, PB6, PB7, PB8},
         Output, PushPull,
     },
@@ -339,19 +339,18 @@ const APP: () = {
         let device: stm32f4::stm32f407::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
         //let mut flash = device.FLASH.constrain();
-        let mut rcc = device.RCC.constrain();
+        let rcc = device.RCC.constrain();
 
         // TODO: test performance and see what this needs to actually be set to
         let clocks = rcc
             .cfgr
             .sysclk(64.mhz())
             .pclk1(32.mhz())
-            //.freeze(&mut flash.acr);
             .freeze();
 
         //let trace = enable_trace(core.DCB);
         // start timer for performance monitoring
-        //let mono = MonoTimer::new(core.DWT, trace, clocks);
+        // let mono = MonoTimer::new(core.DWT, trace, clocks);
 
         // configure the system timer
         // TODO: test performance and see what this needs to actually be set to
@@ -368,15 +367,19 @@ const APP: () = {
 
         //let mut afio = device.AFIO.constrain(&mut rcc.apb2);
 
-        let mut gpioa = device.GPIOA.split();
-        let mut gpiob = device.GPIOB.split();
+        let gpioa = device.GPIOA.split();
+        let gpiob = device.GPIOB.split();
+
+        // DEBUG
+        let mut led1 = gpioa.pa6.into_push_pull_output();
+        led1.set_low();
 
         // SERIAL
         let pa9 = gpioa.pa9.into_alternate_af7();
         let pa10 = gpioa.pa10.into_alternate_af7();
 
         let config = stm32f4xx_hal::serial::config::Config {
-            baudrate: 115_200.bps(),
+            baudrate: 96_000.bps(),
             wordlength: stm32f4xx_hal::serial::config::WordLength::DataBits8,
             parity: stm32f4xx_hal::serial::config::Parity::ParityNone,
             stopbits: stm32f4xx_hal::serial::config::StopBits::STOP1,
