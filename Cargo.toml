@@ -41,7 +41,8 @@ default-features = false
 version = "0.1.4"
 
 [dependencies.gcode]
-git = "https://github.com/Michael-F-Bryan/gcode-rs"
+#git = "https://github.com/Michael-F-Bryan/gcode-rs"
+path = "../gcode-rs/gcode"
 
 [dependencies.stepper-driver]
 git = "https://github.com/etrombly/stepper-driver"

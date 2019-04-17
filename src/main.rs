@@ -447,9 +447,7 @@ const APP: () = {
     fn SysTick() {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
-        if let Some(data) = resources.RX_BUF.read() {
-            let mut stdout = hio::hstdout().unwrap();
-            write!(stdout, "recieved data\n").unwrap();
+        if let Some(data) = resources.RX_BUF.lock(|rx_buf| rx_buf.read()) {
             // add the data to the command buffer
             for c in &data.buffer[0..data.index] {
                 // TODO: handle error here
@@ -458,20 +456,12 @@ const APP: () = {
             // if any lines have been received, process them
             while let Some((line, buffer)) = resources.CMD_BUF.split() {
                 *resources.CMD_BUF = buffer;
-                let mut stdout = hio::hstdout().unwrap();
-                write!(stdout, "processing line\n").unwrap();
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
-                    let mut stdout = hio::hstdout().unwrap();
-                    write!(stdout, "gcode ok\n").unwrap();
                     for line in gcode::parse(gcode) {
-                        let mut stdout = hio::hstdout().unwrap();
-                        write!(stdout, "gcode parsed\n").unwrap();
                         match line.mnemonic() {
                             Mnemonic::General => {
                                 match line.major_number() {
                                     0 | 1 => {
-                                        let mut stdout = hio::hstdout().unwrap();
-                                        write!(stdout, "G0 or G1\n").unwrap();
                                         // TODO: Handle the buffer being full
                                         if resources
                                             .MOVE_BUFFER
@@ -610,34 +600,19 @@ const APP: () = {
                     // calculate the stepper speeds so that x and y movement end at the same time
                     // (linear interpolation)
                     (Some(_x), None) => {
-                        let mut stdout = hio::hstdout().unwrap();
-                        write!(stdout, "in x\n").unwrap();
-
                         resources.TIMER_X.start(MAX_FREQ_X.hz());
-                        write!(stdout, "out of x\n").unwrap();
                     }
                     (None, Some(_y)) => {
-                        let mut stdout = hio::hstdout().unwrap();
-                        write!(stdout, "in y\n").unwrap();
-
                         resources.TIMER_Y.start(MAX_FREQ_Y.hz());
                     }
                     (Some(x), Some(y)) => {
                         if x > y {
-                            let mut stdout = hio::hstdout().unwrap();
-                            write!(stdout, "in x > y\n").unwrap();
-
                             let freq = (MAX_FREQ_Y / (x / y) as u32) + 1;
                             resources.TIMER_X.start(MAX_FREQ_X.hz());
                             resources.TIMER_Y.start(freq.hz());
                         } else {
-                            let mut stdout = hio::hstdout().unwrap();
-                            write!(stdout, "in y > x\n").unwrap();
-
                             let freq = (MAX_FREQ_X / (y / x) as u32) + 1;
-                            write!(stdout, "setting x {}\n", freq).unwrap();
                             resources.TIMER_X.start(freq.hz());
-                            write!(stdout, "setting y\n").unwrap();
                             resources.TIMER_Y.start(MAX_FREQ_Y.hz());
                         }
                     }
@@ -660,7 +635,7 @@ const APP: () = {
             cobs::encode(&data, &mut buf);
             *resources.SLEEP = 0;
             for byte in &buf {
-                block!(resources.TX.write(*byte)).ok();
+                resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
             }
         }
     }
@@ -669,8 +644,6 @@ const APP: () = {
     fn TIM2() {
         if let Some(x) = resources.CURRENT.x {
             if x > 0.0 {
-                let mut stdout = hio::hstdout().unwrap();
-                            write!(stdout, "stepping {}\n", x).unwrap();
                 resources.STEPPER_X.step();
                 resources.CURRENT.x = Some(x - X_STEP_SIZE);
                 match resources.STEPPER_X.direction {
@@ -711,7 +684,7 @@ const APP: () = {
         }
     }
 
-    #[interrupt(resources=[RX,RX_BUF,TX])]
+    #[interrupt(priority = 2, resources=[RX,RX_BUF,TX])]
     fn USART1() {
         // Read each character from serial as it comes in
         match resources.RX.read() {
