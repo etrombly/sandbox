@@ -289,8 +289,8 @@ pub enum Movement {
 
 // CONNECTIONS
 // serial tx and rx
-type TX = Tx<stm32f4::stm32f407::USART1>;
-type RX = Rx<stm32f4::stm32f407::USART1>;
+type TX = Tx<stm32f4::stm32f407::USART2>;
+type RX = Rx<stm32f4::stm32f407::USART2>;
 
 // the first stepper is connected to a ULN2003 on pins PA1-4
 #[allow(non_camel_case_types)]
@@ -369,26 +369,16 @@ const APP: () = {
 
         let gpioa = device.GPIOA.split();
         let gpiob = device.GPIOB.split();
-
-        // DEBUG
-        let mut led1 = gpioa.pa6.into_push_pull_output();
-        led1.set_low();
+        let gpiod = device.GPIOD.split();
 
         // SERIAL
-        let pa9 = gpioa.pa9.into_alternate_af7();
-        let pa10 = gpioa.pa10.into_alternate_af7();
+        let pd5 = gpiod.pd5.into_alternate_af7();
+        let pd6 = gpiod.pd6.into_alternate_af7();
 
-        let config = stm32f4xx_hal::serial::config::Config {
-            baudrate: 96_000.bps(),
-            wordlength: stm32f4xx_hal::serial::config::WordLength::DataBits8,
-            parity: stm32f4xx_hal::serial::config::Parity::ParityNone,
-            stopbits: stm32f4xx_hal::serial::config::StopBits::STOP1,
-        };
-
-        let mut serial = Serial::usart1(
-            device.USART1,
-            (pa9, pa10),
-            config,
+        let mut serial = Serial::usart2(
+            device.USART2,
+            (pd5, pd6),
+            stm32f4xx_hal::serial::config::Config::default(),
             clocks,
         ).unwrap();
 
@@ -439,7 +429,7 @@ const APP: () = {
             //resources.SLEEP.lock(|sleep| *sleep += before.elapsed());
             rtfm::pend(Interrupt::TIM2);
             rtfm::pend(Interrupt::TIM3);
-            rtfm::pend(Interrupt::USART1);
+            rtfm::pend(Interrupt::USART2);
         }
     }
 
@@ -665,7 +655,7 @@ const APP: () = {
     }
 
     #[interrupt(resources=[RX,RX_BUF,TX])]
-    fn USART1() {
+    fn USART2() {
         // Read each character from serial as it comes in
         match resources.RX.read() {
             Ok(c) => {
@@ -675,9 +665,11 @@ const APP: () = {
             Err(e) => {
                 match e {
                     nb::Error::WouldBlock => {
+                        /*
                         for c in b"blocking\r\n" {
                             block!(resources.TX.write(*c)).ok();
                         }
+                        */
                     }
                     // currently no way to easily clear the overrun flag, if you hit this
                     // it'll be stuck here

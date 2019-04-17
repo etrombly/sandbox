@@ -12,12 +12,15 @@ edition = "2018"
 [dependencies]
 cortex-m = "0.5.8"
 nb = "0.1.1"
-cortex-m-rtfm = "0.4.2"
 cortex-m-semihosting = "0.3.2"
-cortex-m-rt = "0.6.5"
+cortex-m-rt = "0.6.8"
 libm = "0.1.2"
 panic-abort = "0.3.1"
 panic-semihosting = "0.5.1"
+
+[dependencies.cortex-m-rtfm]
+version = "0.4.2"
+features =["nightly"]
 
 [dependencies.stm32f4]
 version = "0.6.0"
