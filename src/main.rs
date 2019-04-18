@@ -9,17 +9,14 @@
 extern crate panic_semihosting;
 
 // debugging
-use cortex_m_semihosting::hio;
 use core::fmt::Write;
+use cortex_m_semihosting::hio;
 
-use cortex_m::peripheral::syst::SystClkSource;
-use gcode::{Mnemonic, Parser};
+use gcode::Mnemonic;
 use nb::block;
 use rtfm::{app, Instant};
 // atan2 and sqrt
 use libm::F32Ext;
-// numbers to string for debugging output
-use numtoa::NumToA;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
 use stm32f1::stm32f103::Interrupt;
@@ -344,7 +341,6 @@ const APP: () = {
     #[init(schedule = [process, perf])]
     fn init() -> init::LateResources {
         let device: stm32f1::stm32f103::Peripherals = device;
-        let mut core: rtfm::Peripherals = core;
         let mut flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
         let mut afio = device.AFIO.constrain(&mut rcc.apb2);
@@ -370,17 +366,20 @@ const APP: () = {
         // enable interrupt mask for line 0 and 1
         exti.imr.write(|w| {
             w.mr0().set_bit();
-            w.mr1().set_bit()});
-        
+            w.mr1().set_bit()
+        });
+
         // set to rising edge triggering
         exti.rtsr.write(|w| {
             w.tr0().set_bit();
-            w.tr1().set_bit()});
-        
+            w.tr1().set_bit()
+        });
+
         // set exti0 and 1 to PC
-        afio.exticr1.exticr1().write(|w| unsafe{
+        afio.exticr1.exticr1().write(|w| unsafe {
             w.exti0().bits(2);
-            w.exti1().bits(2)});
+            w.exti1().bits(2)
+        });
 
         // SERIAL
         let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
@@ -422,7 +421,9 @@ const APP: () = {
         }
 
         // TODO: tweak how often this runs
-        schedule.process(Instant::now() + 1_000_000.cycles()).unwrap();
+        schedule
+            .process(Instant::now() + 1_000_000.cycles())
+            .unwrap();
         schedule.perf(Instant::now() + 64_000_000.cycles()).unwrap();
 
         init::LateResources {
@@ -441,11 +442,13 @@ const APP: () = {
         rtfm::pend(Interrupt::EXTI0);
         rtfm::pend(Interrupt::EXTI1);
         rtfm::pend(Interrupt::TIM2);
-        rtfm::pend(Interrupt::TIM3); 
+        rtfm::pend(Interrupt::TIM3);
         loop {
             let before = Instant::now();
             wfi();
-            resources.SLEEP.lock(|sleep| *sleep += before.elapsed().as_cycles());  
+            resources
+                .SLEEP
+                .lock(|sleep| *sleep += before.elapsed().as_cycles());
         }
     }
 
@@ -488,10 +491,7 @@ const APP: () = {
                                             } else {
                                                 resources.VIRT_LOCATION.y
                                             };
-                                            *resources.VIRT_LOCATION = Point {
-                                                x: x,
-                                                y: y,
-                                            };
+                                            *resources.VIRT_LOCATION = Point { x, y };
                                         }
                                     }
                                     // TODO: if path planning is going to be added arcs should be converted in to linear moves here
@@ -520,10 +520,7 @@ const APP: () = {
                                             } else {
                                                 resources.VIRT_LOCATION.y
                                             };
-                                            *resources.VIRT_LOCATION = Point {
-                                                x: x,
-                                                y: y,
-                                            };
+                                            *resources.VIRT_LOCATION = Point { x, y };
                                         }
                                     }
                                     3 => {
@@ -631,8 +628,8 @@ const APP: () = {
     }
 
     #[task(schedule = [perf], resources = [SLEEP, TX, LOCATION])]
-    fn perf(){
-            // send performance info once a second
+    fn perf() {
+        // send performance info once a second
         // TODO: figure out a good interval, 1 second may be too long to be useful
         // write the cpu monitoring data out
         let mut data = [0; 12];
@@ -726,13 +723,12 @@ const APP: () = {
 
     #[interrupt]
     fn EXTI0() {
-        let mut stdout = hio::hstdout().unwrap();	
-        write!(stdout, "interrupt triggered\n").unwrap();
+        let mut stdout = hio::hstdout().unwrap();
+        writeln!(stdout, "interrupt triggered").unwrap();
     }
 
     #[interrupt]
-    fn EXTI1() {
-    }
+    fn EXTI1() {}
 
     extern "C" {
         fn USART2();
