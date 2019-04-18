@@ -388,7 +388,7 @@ const APP: () = {
             device.USART1,
             (pa9, pa10),
             &mut afio.mapr,
-            115_200.bps(),
+            9_600.bps(),
             clocks,
             &mut rcc.apb2,
         );
@@ -715,5 +715,13 @@ const APP: () = {
                 }
             }
         }
+    }
+
+    #[interrupt]
+    fn EXTI0() {
+    }
+
+    #[interrupt]
+    fn EXTI1() {
     }
 };
