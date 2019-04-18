@@ -642,6 +642,7 @@ const APP: () = {
         for byte in &buf {
             resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
         }
+        schedule.perf(scheduled + 64_000_000.cycles()).unwrap();
     }
 
     #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X, TX])]
