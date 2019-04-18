@@ -1,6 +1,6 @@
 //! zen garden sandbox
 
-#![deny(unsafe_code)]
+//#![deny(unsafe_code)]
 //#![deny(warnings)]
 #![no_main]
 #![no_std]
@@ -351,6 +351,8 @@ const APP: () = {
         let mut core: rtfm::Peripherals = core;
         let mut flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
+        let mut afio = device.AFIO.constrain(&mut rcc.apb2);
+        let exti = device.EXTI;
 
         // TODO: test performance and see what this needs to actually be set to
         let clocks = rcc
@@ -375,10 +377,24 @@ const APP: () = {
         let tim2 = Timer::tim2(device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
         let tim3 = Timer::tim3(device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
-        let mut afio = device.AFIO.constrain(&mut rcc.apb2);
-
         let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
+
+        // configure interrupts, PC0 to EXTI0, PC1 to EXTI1
+        // enable interrupt mask for line 0 and 1
+        exti.imr.write(|w| {
+            w.mr0().set_bit();
+            w.mr1().set_bit()});
+        
+        // set to rising edge triggering
+        exti.rtsr.write(|w| {
+            w.tr0().set_bit();
+            w.tr1().set_bit()});
+        
+        // set exti0 and 1 to PC
+        afio.exticr1.exticr1().write(|w| unsafe{
+            w.exti0().bits(2);
+            w.exti1().bits(2)});
 
         // SERIAL
         let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
@@ -434,6 +450,8 @@ const APP: () = {
     #[idle(resources = [MONO, SLEEP])]
     fn idle() -> ! {
         rtfm::pend(Interrupt::USART1);
+        rtfm::pend(Interrupt::EXTI0);
+        rtfm::pend(Interrupt::EXTI1);
         rtfm::pend(Interrupt::TIM2);
         rtfm::pend(Interrupt::TIM3); 
         loop {
@@ -719,6 +737,8 @@ const APP: () = {
 
     #[interrupt]
     fn EXTI0() {
+        let mut stdout = hio::hstdout().unwrap();	
+        write!(stdout, "interrupt triggered\n").unwrap();
     }
 
     #[interrupt]
