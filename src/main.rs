@@ -544,6 +544,15 @@ const APP: () = {
                                             .is_err()
                                         {}
                                     }
+                                    28 => {
+                                        // TODO: add support for homing x or y individually
+                                        if resources
+                                            .MOVE_BUFFER
+                                            .push(&Movement::LinearMove(LinearMove {
+                                                x: Some(-100_000.0),
+                                                y: Some(-100_000.0),
+                                            })).is_err() {}
+                                    }
                                     _ => {}
                                 }
                             }
@@ -728,18 +737,20 @@ const APP: () = {
         }
     }
 
-    #[interrupt(resources=[EXTI])]
+    #[interrupt(resources=[EXTI, LOCATION, VIRT_LOCATION, CURRENT])]
     fn EXTI0() {
-        let mut stdout = hio::hstdout().unwrap();
-        writeln!(stdout, "interrupt 0 triggered").unwrap();
-        resources.EXTI.pr.write(|w| w.pr0().set_bit())
+        resources.CURRENT.x = None;
+        resources.LOCATION.x = 0.0;
+        resources.VIRT_LOCATION.x = 0.0;
+        resources.EXTI.pr.write(|w| w.pr0().set_bit());
     }
 
-    #[interrupt(resources=[EXTI])]
+    #[interrupt(resources=[EXTI, LOCATION, VIRT_LOCATION, CURRENT])]
     fn EXTI1() {
-        let mut stdout = hio::hstdout().unwrap();
-        writeln!(stdout, "interrupt 1 triggered").unwrap();
-        resources.EXTI.pr.write(|w| w.pr1().set_bit())
+        resources.CURRENT.y = None;
+        resources.LOCATION.y = 0.0;
+        resources.VIRT_LOCATION.y = 0.0;
+        resources.EXTI.pr.write(|w| w.pr1().set_bit());
     }
 
     extern "C" {
