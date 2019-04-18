@@ -336,6 +336,8 @@ const APP: () = {
     static mut TIMER_Y: Timer<stm32f1::stm32f103::TIM3> = ();
     static mut TX: TX = ();
     static mut RX: RX = ();
+    // need to pass external interrupt register so the pending bit can be cleared in the handler
+    static mut EXTI: stm32f1::stm32f103::EXTI = ();
     static mut SLEEP: u32 = 0;
 
     #[init(schedule = [process, perf])]
@@ -362,7 +364,10 @@ const APP: () = {
         let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
 
-        // configure interrupts, PC0 to EXTI0, PC1 to EXTI1
+        gpiob.pb0.into_pull_down_input(&mut gpiob.crl);
+        gpiob.pb1.into_pull_down_input(&mut gpiob.crl);
+
+        // configure interrupts, PB0 to EXTI0, PB1 to EXTI1
         // enable interrupt mask for line 0 and 1
         exti.imr.write(|w| {
             w.mr0().set_bit();
@@ -377,8 +382,8 @@ const APP: () = {
 
         // set exti0 and 1 to PC
         afio.exticr1.exticr1().write(|w| unsafe {
-            w.exti0().bits(2);
-            w.exti1().bits(2)
+            w.exti0().bits(1);
+            w.exti1().bits(1)
         });
 
         // SERIAL
@@ -433,6 +438,7 @@ const APP: () = {
             TIMER_Y: tim3,
             TX: tx,
             RX: rx,
+            EXTI: exti,
         }
     }
 
@@ -722,14 +728,20 @@ const APP: () = {
         }
     }
 
-    #[interrupt]
+    // TODO: add some debounce on this
+    #[interrupt(resources=[EXTI])]
     fn EXTI0() {
         let mut stdout = hio::hstdout().unwrap();
-        writeln!(stdout, "interrupt triggered").unwrap();
+        writeln!(stdout, "interrupt 0 triggered").unwrap();
+        resources.EXTI.pr.write(|w| w.pr0().set_bit())
     }
 
-    #[interrupt]
-    fn EXTI1() {}
+    #[interrupt(resources=[EXTI])]
+    fn EXTI1() {
+        let mut stdout = hio::hstdout().unwrap();
+        writeln!(stdout, "interrupt 1 triggered").unwrap();
+        resources.EXTI.pr.write(|w| w.pr1().set_bit())
+    }
 
     extern "C" {
         fn USART2();
