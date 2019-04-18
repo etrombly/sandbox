@@ -365,7 +365,7 @@ const APP: () = {
         // configure the system timer
         // TODO: test performance and see what this needs to actually be set to
         core.SYST.set_clock_source(SystClkSource::Core);
-        core.SYST.set_reload(100_000);
+        core.SYST.set_reload(10_000);
         core.SYST.enable_interrupt();
         core.SYST.enable_counter();
 
