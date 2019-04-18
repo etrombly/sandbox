@@ -1,23 +1,29 @@
 //! zen garden sandbox
 
-#![deny(unsafe_code)]
-#![deny(warnings)]
+//#![deny(unsafe_code)]
+//#![deny(warnings)]
 #![no_main]
 #![no_std]
 
-extern crate panic_abort;
+//extern crate panic_abort;
+extern crate panic_semihosting;
+
+// debugging
+use cortex_m_semihosting::hio;
+use core::fmt::Write;
 
 use cortex_m::peripheral::syst::SystClkSource;
-use gcode::Mnemonic;
+use gcode::{Mnemonic, Parser};
 use nb::block;
-use rtfm::app;
+use rtfm::{app, Instant};
 // atan2 and sqrt
 use libm::F32Ext;
+// numbers to string for debugging output
+use numtoa::NumToA;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
-use stm32f103xx::Interrupt;
-use stm32f103xx_hal::{
-    //flash::FlashExt,
+use stm32f1::stm32f103::Interrupt;
+use stm32f1xx_hal::{
     gpio::{
         gpioa::{PA1, PA2, PA3, PA4},
         gpiob::{PB5, PB6, PB7, PB8},
@@ -25,7 +31,6 @@ use stm32f103xx_hal::{
     },
     prelude::*,
     serial::{Rx, Serial, Tx},
-    time::{enable_trace, Instant, MonoTimer},
     timer::{Event, Timer},
 };
 
@@ -43,17 +48,18 @@ const X_STEP_SIZE: f32 = 1.0 / X_STEPS_MM;
 const Y_STEPS_MM: f32 = 600.0;
 const Y_STEP_SIZE: f32 = 1.0 / Y_STEPS_MM;
 // max speed in mm/s
-const MAX_SPEED: f32 = 0.01;
+const MAX_SPEED: f32 = 0.4;
 const MAX_FREQ_X: u32 = (MAX_SPEED / X_STEP_SIZE) as u32;
 const MAX_FREQ_Y: u32 = (MAX_SPEED / Y_STEP_SIZE) as u32;
 // Length of linear segment for arcs
 const MM_PER_ARC_SEGMENT: f32 = 1.0;
 
 // max characters allowed in a line of gcode
-const RX_SZ: usize = 256;
+const RX_SZ: usize = 512;
 
 // number of moves to buffer
-const MOVE_SZ: usize = 256;
+//const MOVE_SZ: usize = 256;
+const MOVE_SZ: usize = 100;
 
 // TODO: put the structs in a lib
 // Movebuffer holds all movements parsed from gcode
@@ -71,6 +77,10 @@ impl MoveBuffer {
             tail: 0,
             buffer: [Movement::LinearMove(LinearMove { x: None, y: None }); MOVE_SZ],
         }
+    }
+
+    pub fn len(&self) -> usize {
+        self.tail - self.head
     }
 
     pub fn push(&mut self, movement: &Movement) -> Result<(), ()> {
@@ -289,8 +299,8 @@ pub enum Movement {
 
 // CONNECTIONS
 // serial tx and rx
-type TX = Tx<stm32f103xx::USART1>;
-type RX = Rx<stm32f103xx::USART1>;
+type TX = Tx<stm32f1::stm32f103::USART1>;
+type RX = Rx<stm32f1::stm32f103::USART1>;
 
 // the first stepper is connected to a ULN2003 on pins PA1-4
 #[allow(non_camel_case_types)]
@@ -312,7 +322,7 @@ type STEPPER_Y = Stepper<
     ULN2003,
 >;
 
-#[app(device = stm32f103xx)]
+#[app(device = stm32f1::stm32f103)]
 const APP: () = {
     // linear move that is active
     static mut CURRENT: LinearMove = LinearMove::new();
@@ -325,21 +335,20 @@ const APP: () = {
     static mut VIRT_LOCATION: Point = Point { x: 0.0, y: 0.0 };
     static mut STEPPER_X: STEPPER_X = ();
     static mut STEPPER_Y: STEPPER_Y = ();
-    static mut TIMER_X: Timer<stm32f103xx::TIM2> = ();
-    static mut TIMER_Y: Timer<stm32f103xx::TIM3> = ();
+    static mut TIMER_X: Timer<stm32f1::stm32f103::TIM2> = ();
+    static mut TIMER_Y: Timer<stm32f1::stm32f103::TIM3> = ();
     static mut TX: TX = ();
     static mut RX: RX = ();
-    static mut LAST_UPDATE: Instant = ();
-    // monotimer for cpu monitor
-    static MONO: MonoTimer = ();
     static mut SLEEP: u32 = 0;
 
-    #[init]
-    fn init() {
-        let device: stm32f103xx::Peripherals = device;
+    #[init(schedule = [process, perf])]
+    fn init() -> init::LateResources {
+        let device: stm32f1::stm32f103::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
         let mut flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
+        let mut afio = device.AFIO.constrain(&mut rcc.apb2);
+        let exti = device.EXTI;
 
         // TODO: test performance and see what this needs to actually be set to
         let clocks = rcc
@@ -348,27 +357,30 @@ const APP: () = {
             .pclk1(32.mhz())
             .freeze(&mut flash.acr);
 
-        let trace = enable_trace(core.DCB);
-        // start timer for performance monitoring
-        let mono = MonoTimer::new(core.DWT, trace, clocks);
-
-        // configure the system timer
-        // TODO: test performance and see what this needs to actually be set to
-        core.SYST.set_clock_source(SystClkSource::Core);
-        core.SYST.set_reload(100_000);
-        core.SYST.enable_interrupt();
-        core.SYST.enable_counter();
-
         // These timers are used to control the step speed of the steppers
         // the initial update freq doesn't matter since they won't start until a move is received
         // just don't set to 0hz
         let tim2 = Timer::tim2(device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
         let tim3 = Timer::tim3(device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
-        let mut afio = device.AFIO.constrain(&mut rcc.apb2);
-
         let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
+
+        // configure interrupts, PC0 to EXTI0, PC1 to EXTI1
+        // enable interrupt mask for line 0 and 1
+        exti.imr.write(|w| {
+            w.mr0().set_bit();
+            w.mr1().set_bit()});
+        
+        // set to rising edge triggering
+        exti.rtsr.write(|w| {
+            w.tr0().set_bit();
+            w.tr1().set_bit()});
+        
+        // set exti0 and 1 to PC
+        afio.exticr1.exticr1().write(|w| unsafe{
+            w.exti0().bits(2);
+            w.exti1().bits(2)});
 
         // SERIAL
         let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
@@ -378,13 +390,13 @@ const APP: () = {
             device.USART1,
             (pa9, pa10),
             &mut afio.mapr,
-            115_200.bps(),
+            9_600.bps(),
             clocks,
             &mut rcc.apb2,
         );
 
         // Enable RX interrupt
-        serial.listen(stm32f103xx_hal::serial::Event::Rxne);
+        serial.listen(stm32f1xx_hal::serial::Event::Rxne);
 
         let (mut tx, rx) = serial.split();
 
@@ -405,37 +417,43 @@ const APP: () = {
         );
 
         // TODO: look in to changing serial TX back to DMA
-        for c in b"initialized\r\n" {
+        for c in b"\r\ninitialized\r\n" {
             block!(tx.write(*c)).ok();
         }
 
-        STEPPER_X = stepper_x;
-        STEPPER_Y = stepper_y;
-        TIMER_X = tim2;
-        TIMER_Y = tim3;
-        LAST_UPDATE = mono.now();
-        MONO = mono;
-        TX = tx;
-        RX = rx;
-    }
+        // TODO: tweak how often this runs
+        schedule.process(Instant::now() + 1_000_000.cycles()).unwrap();
+        schedule.perf(Instant::now() + 64_000_000.cycles()).unwrap();
 
-    #[idle(resources = [MONO, SLEEP])]
-    fn idle() -> ! {
-        loop {
-            let before = resources.MONO.now();
-            wfi();
-            resources.SLEEP.lock(|sleep| *sleep += before.elapsed());
-            rtfm::pend(Interrupt::TIM2);
-            rtfm::pend(Interrupt::TIM3);
-            rtfm::pend(Interrupt::USART1);
+        init::LateResources {
+            STEPPER_X: stepper_x,
+            STEPPER_Y: stepper_y,
+            TIMER_X: tim2,
+            TIMER_Y: tim3,
+            TX: tx,
+            RX: rx,
         }
     }
 
-    #[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y, LAST_UPDATE, MONO])]
-    fn SysTick() {
+    #[idle(resources = [SLEEP])]
+    fn idle() -> ! {
+        rtfm::pend(Interrupt::USART1);
+        rtfm::pend(Interrupt::EXTI0);
+        rtfm::pend(Interrupt::EXTI1);
+        rtfm::pend(Interrupt::TIM2);
+        rtfm::pend(Interrupt::TIM3); 
+        loop {
+            let before = Instant::now();
+            wfi();
+            resources.SLEEP.lock(|sleep| *sleep += before.elapsed().as_cycles());  
+        }
+    }
+
+    #[task(schedule = [process], resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y])]
+    fn process() {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
-        if let Some(data) = resources.RX_BUF.read() {
+        if let Some(data) = resources.RX_BUF.lock(|rx_buf| rx_buf.read()) {
             // add the data to the command buffer
             for c in &data.buffer[0..data.index] {
                 // TODO: handle error here
@@ -445,7 +463,7 @@ const APP: () = {
             while let Some((line, buffer)) = resources.CMD_BUF.split() {
                 *resources.CMD_BUF = buffer;
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
-                    for line in gcode::parse(&gcode) {
+                    for line in gcode::parse(gcode) {
                         match line.mnemonic() {
                             Mnemonic::General => {
                                 match line.major_number() {
@@ -460,9 +478,19 @@ const APP: () = {
                                             .is_err()
                                         {
                                         } else {
+                                            let x = if let Some(x) = line.value_for('x') {
+                                                x
+                                            } else {
+                                                resources.VIRT_LOCATION.x
+                                            };
+                                            let y = if let Some(y) = line.value_for('y') {
+                                                y
+                                            } else {
+                                                resources.VIRT_LOCATION.y
+                                            };
                                             *resources.VIRT_LOCATION = Point {
-                                                x: line.value_for('x').unwrap(),
-                                                y: line.value_for('y').unwrap(),
+                                                x: x,
+                                                y: y,
                                             };
                                         }
                                     }
@@ -482,9 +510,19 @@ const APP: () = {
                                             .is_err()
                                         {
                                         } else {
+                                            let x = if let Some(x) = line.value_for('x') {
+                                                x
+                                            } else {
+                                                resources.VIRT_LOCATION.x
+                                            };
+                                            let y = if let Some(y) = line.value_for('y') {
+                                                y
+                                            } else {
+                                                resources.VIRT_LOCATION.y
+                                            };
                                             *resources.VIRT_LOCATION = Point {
-                                                x: line.value_for('x').unwrap(),
-                                                y: line.value_for('y').unwrap(),
+                                                x: x,
+                                                y: y,
                                             };
                                         }
                                     }
@@ -575,11 +613,11 @@ const APP: () = {
                     }
                     (Some(x), Some(y)) => {
                         if x > y {
-                            let freq = MAX_FREQ_Y / (x / y) as u32 + 1;
+                            let freq = (MAX_FREQ_Y / (x / y) as u32) + 1;
                             resources.TIMER_X.start(MAX_FREQ_X.hz());
                             resources.TIMER_Y.start(freq.hz());
                         } else {
-                            let freq = MAX_FREQ_X / (y / x) as u32 + 1;
+                            let freq = (MAX_FREQ_X / (y / x) as u32) + 1;
                             resources.TIMER_X.start(freq.hz());
                             resources.TIMER_Y.start(MAX_FREQ_Y.hz());
                         }
@@ -588,26 +626,28 @@ const APP: () = {
                 }
             }
         }
+        // TODO: tweak how often this runs
+        schedule.process(scheduled + 1_000_000.cycles()).unwrap();
+    }
 
-        // send performance info once a second
+    #[task(schedule = [perf], resources = [SLEEP, TX, LOCATION])]
+    fn perf(){
+            // send performance info once a second
         // TODO: figure out a good interval, 1 second may be too long to be useful
-        if resources.LAST_UPDATE.elapsed() > 32_000_000 {
-            *resources.LAST_UPDATE = resources.MONO.now();
-            // write the cpu monitoring data out
-            let mut data = [0; 12];
-            let mut buf: [u8; 13] = [0; 13];
-            LE::write_u32(&mut data[0..4], *resources.SLEEP);
-            LE::write_f32(&mut data[4..8], resources.LOCATION.x);
-            LE::write_f32(&mut data[8..12], resources.LOCATION.y);
-            cobs::encode(&data, &mut buf);
-            *resources.SLEEP = 0;
-            for byte in &buf {
-                block!(resources.TX.write(*byte)).ok();
-            }
+        // write the cpu monitoring data out
+        let mut data = [0; 12];
+        let mut buf: [u8; 13] = [0; 13];
+        LE::write_u32(&mut data[0..4], *resources.SLEEP);
+        LE::write_f32(&mut data[4..8], resources.LOCATION.x);
+        LE::write_f32(&mut data[8..12], resources.LOCATION.y);
+        cobs::encode(&data, &mut buf);
+        *resources.SLEEP = 0;
+        for byte in &buf {
+            resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
         }
     }
 
-    #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X])]
+    #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X, TX])]
     fn TIM2() {
         if let Some(x) = resources.CURRENT.x {
             if x > 0.0 {
@@ -651,7 +691,7 @@ const APP: () = {
         }
     }
 
-    #[interrupt(resources=[RX,RX_BUF,TX])]
+    #[interrupt(priority = 2, resources=[RX,RX_BUF,TX])]
     fn USART1() {
         // Read each character from serial as it comes in
         match resources.RX.read() {
@@ -661,15 +701,16 @@ const APP: () = {
             }
             Err(e) => {
                 match e {
+                    // no data available
                     nb::Error::WouldBlock => {
+                        /*
                         for c in b"blocking\r\n" {
                             block!(resources.TX.write(*c)).ok();
                         }
+                        */
                     }
-                    // currently no way to easily clear the overrun flag, if you hit this
-                    // it'll be stuck here
-                    nb::Error::Other(stm32f103xx_hal::serial::Error::Overrun) => {
-                        for c in b"overrun error\r\n" {
+                    nb::Error::Other(stm32f1xx_hal::serial::Error::Overrun) => {
+                        for c in b"rx buffer overrun error\r\n" {
                             block!(resources.TX.write(*c)).ok();
                         }
                     }
@@ -681,5 +722,19 @@ const APP: () = {
                 }
             }
         }
+    }
+
+    #[interrupt]
+    fn EXTI0() {
+        let mut stdout = hio::hstdout().unwrap();	
+        write!(stdout, "interrupt triggered\n").unwrap();
+    }
+
+    #[interrupt]
+    fn EXTI1() {
+    }
+
+    extern "C" {
+        fn USART2();
     }
 };
