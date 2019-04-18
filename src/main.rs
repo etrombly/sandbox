@@ -1,4 +1,5 @@
 //! zen garden sandbox
+//! currently only supports relative positioning
 
 //#![deny(unsafe_code)]
 //#![deny(warnings)]
