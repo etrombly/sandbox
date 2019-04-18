@@ -31,6 +31,7 @@ features = ["stm32f103", "rt"]
 [dependencies.cortex-m-rtfm]
 version = "0.4.2"
 #features = ["nightly"]
+features = ["timer-queue"]
 
 [dependencies.byteorder]
 default-features = false

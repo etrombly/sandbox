@@ -15,7 +15,7 @@ use core::fmt::Write;
 use cortex_m::peripheral::syst::SystClkSource;
 use gcode::{Mnemonic, Parser};
 use nb::block;
-use rtfm::app;
+use rtfm::{app, Instant};
 // atan2 and sqrt
 use libm::F32Ext;
 // numbers to string for debugging output
@@ -31,7 +31,6 @@ use stm32f1xx_hal::{
     },
     prelude::*,
     serial::{Rx, Serial, Tx},
-    time::{Instant, MonoTimer},
     timer::{Event, Timer},
 };
 
@@ -340,12 +339,9 @@ const APP: () = {
     static mut TIMER_Y: Timer<stm32f1::stm32f103::TIM3> = ();
     static mut TX: TX = ();
     static mut RX: RX = ();
-    static mut LAST_UPDATE: Instant = ();
-    // monotimer for cpu monitor
-    static MONO: MonoTimer = ();
     static mut SLEEP: u32 = 0;
 
-    #[init]
+    #[init(schedule = [process, perf])]
     fn init() -> init::LateResources {
         let device: stm32f1::stm32f103::Peripherals = device;
         let mut core: rtfm::Peripherals = core;
@@ -360,16 +356,6 @@ const APP: () = {
             .sysclk(64.mhz())
             .pclk1(32.mhz())
             .freeze(&mut flash.acr);
-
-        // start timer for performance monitoring
-        let mono = MonoTimer::new(core.DWT, clocks);
-
-        // configure the system timer
-        // TODO: test performance and see what this needs to actually be set to
-        core.SYST.set_clock_source(SystClkSource::Core);
-        core.SYST.set_reload(10_000);
-        core.SYST.enable_interrupt();
-        core.SYST.enable_counter();
 
         // These timers are used to control the step speed of the steppers
         // the initial update freq doesn't matter since they won't start until a move is received
@@ -435,19 +421,21 @@ const APP: () = {
             block!(tx.write(*c)).ok();
         }
 
+        // TODO: tweak how often this runs
+        schedule.process(Instant::now() + 1_000_000.cycles()).unwrap();
+        schedule.perf(Instant::now() + 64_000_000.cycles()).unwrap();
+
         init::LateResources {
             STEPPER_X: stepper_x,
             STEPPER_Y: stepper_y,
             TIMER_X: tim2,
             TIMER_Y: tim3,
-            LAST_UPDATE: mono.now(),
-            MONO: mono,
             TX: tx,
             RX: rx,
         }
     }
 
-    #[idle(resources = [MONO, SLEEP])]
+    #[idle(resources = [SLEEP])]
     fn idle() -> ! {
         rtfm::pend(Interrupt::USART1);
         rtfm::pend(Interrupt::EXTI0);
@@ -455,14 +443,14 @@ const APP: () = {
         rtfm::pend(Interrupt::TIM2);
         rtfm::pend(Interrupt::TIM3); 
         loop {
-            let before = resources.MONO.now();
+            let before = Instant::now();
             wfi();
-            resources.SLEEP.lock(|sleep| *sleep += before.elapsed());  
+            resources.SLEEP.lock(|sleep| *sleep += before.elapsed().as_cycles());  
         }
     }
 
-    #[exception(resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y, LAST_UPDATE, MONO])]
-    fn SysTick() {
+    #[task(schedule = [process], resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y])]
+    fn process() {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
         if let Some(data) = resources.RX_BUF.lock(|rx_buf| rx_buf.read()) {
@@ -638,23 +626,24 @@ const APP: () = {
                 }
             }
         }
+        // TODO: tweak how often this runs
+        schedule.process(scheduled + 1_000_000.cycles()).unwrap();
+    }
 
-        // send performance info once a second
+    #[task(schedule = [perf], resources = [SLEEP, TX, LOCATION])]
+    fn perf(){
+            // send performance info once a second
         // TODO: figure out a good interval, 1 second may be too long to be useful
-
-        if resources.LAST_UPDATE.elapsed() > 32_000_000 {
-            *resources.LAST_UPDATE = resources.MONO.now();
-            // write the cpu monitoring data out
-            let mut data = [0; 12];
-            let mut buf: [u8; 13] = [0; 13];
-            LE::write_u32(&mut data[0..4], *resources.SLEEP);
-            LE::write_f32(&mut data[4..8], resources.LOCATION.x);
-            LE::write_f32(&mut data[8..12], resources.LOCATION.y);
-            cobs::encode(&data, &mut buf);
-            *resources.SLEEP = 0;
-            for byte in &buf {
-                resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
-            }
+        // write the cpu monitoring data out
+        let mut data = [0; 12];
+        let mut buf: [u8; 13] = [0; 13];
+        LE::write_u32(&mut data[0..4], *resources.SLEEP);
+        LE::write_f32(&mut data[4..8], resources.LOCATION.x);
+        LE::write_f32(&mut data[8..12], resources.LOCATION.y);
+        cobs::encode(&data, &mut buf);
+        *resources.SLEEP = 0;
+        for byte in &buf {
+            resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
         }
     }
 
@@ -743,5 +732,9 @@ const APP: () = {
 
     #[interrupt]
     fn EXTI1() {
+    }
+
+    extern "C" {
+        fn USART2();
     }
 };
