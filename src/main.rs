@@ -1,17 +1,15 @@
 //! zen garden sandbox
-//! currently only supports relative positioning
 
 //#![deny(unsafe_code)]
 //#![deny(warnings)]
 #![no_main]
 #![no_std]
 
-//extern crate panic_abort;
-extern crate panic_semihosting;
+extern crate panic_abort;
 
 // debugging
-use core::fmt::Write;
-use cortex_m_semihosting::hio;
+// use core::fmt::Write;
+// use cortex_m_semihosting::hio;
 
 use gcode::Mnemonic;
 use nb::block;
@@ -81,6 +79,10 @@ impl MoveBuffer {
         self.tail - self.head
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub fn push(&mut self, movement: &Movement) -> Result<(), ()> {
         let next_tail = (self.tail + 1) % MOVE_SZ;
         if next_tail != self.head {
@@ -92,7 +94,15 @@ impl MoveBuffer {
         }
     }
 
-    pub fn next(&mut self) -> Option<LinearMove> {
+    pub fn clear(&mut self) {
+        self.tail = self.head;
+    }
+}
+
+impl Iterator for MoveBuffer {
+    type Item = LinearMove;
+
+    fn next(&mut self) -> Option<LinearMove> {
         if self.head != self.tail {
             match &mut self.buffer[self.head] {
                 // if movement is linear just return it
@@ -114,10 +124,6 @@ impl MoveBuffer {
         } else {
             None
         }
-    }
-
-    pub fn clear(&mut self) {
-        self.tail = self.head;
     }
 }
 
@@ -463,7 +469,7 @@ const APP: () = {
     fn process() {
         // check if any commands have been received, if so process the gcode
         // TODO: this currently isn't fast enough to keep up if batches of commands are sent
-        if let Some(data) = resources.RX_BUF.lock(|rx_buf| rx_buf.read()) {
+        if let Some(data) = resources.RX_BUF.lock(Buffer::read) {
             // add the data to the command buffer
             for c in &data.buffer[0..data.index] {
                 // TODO: handle error here
@@ -552,7 +558,9 @@ const APP: () = {
                                             .push(&Movement::LinearMove(LinearMove {
                                                 x: Some(-100_000.0),
                                                 y: Some(-100_000.0),
-                                            })).is_err() {}
+                                            }))
+                                            .is_err()
+                                        {}
                                     }
                                     _ => {}
                                 }
