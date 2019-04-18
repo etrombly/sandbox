@@ -364,7 +364,7 @@ const APP: () = {
         let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
 
-        gpiob.pb0.into_pull_down_input(&mut gpiob.crl);
+        gpiob.pb0.into_pull_up_input(&mut gpiob.crl);
         gpiob.pb1.into_pull_down_input(&mut gpiob.crl);
 
         // configure interrupts, PB0 to EXTI0, PB1 to EXTI1
@@ -374,8 +374,8 @@ const APP: () = {
             w.mr1().set_bit()
         });
 
-        // set to rising edge triggering
-        exti.rtsr.write(|w| {
+        // set to falling edge triggering
+        exti.ftsr.write(|w| {
             w.tr0().set_bit();
             w.tr1().set_bit()
         });
@@ -728,7 +728,6 @@ const APP: () = {
         }
     }
 
-    // TODO: add some debounce on this
     #[interrupt(resources=[EXTI])]
     fn EXTI0() {
         let mut stdout = hio::hstdout().unwrap();
