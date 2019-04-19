@@ -16,8 +16,6 @@ cortex-m-semihosting = "0.3.2"
 cortex-m-rt = "0.6.8"
 libm = "0.1.2"
 panic-abort = "0.3.1"
-panic-semihosting = "0.5.1"
-panic-itm = "0.4.0"
 
 [dependencies.stm32f1]
 version = "0.6.0"
@@ -29,6 +27,7 @@ features = ["stm32f103", "rt"]
 
 [dependencies.cortex-m-rtfm]
 version = "0.4.2"
+# disabled nightly feature because maybeuninit syntax changed, waiting for patch
 #features = ["nightly"]
 features = ["timer-queue"]
 
@@ -41,14 +40,19 @@ default-features = false
 version = "0.1.4"
 
 [dependencies.gcode]
+# using local copy until https://github.com/Michael-F-Bryan/gcode-rs/issues/35 is resolved
 #git = "https://github.com/Michael-F-Bryan/gcode-rs"
 path = "../gcode-rs/gcode"
 
 [dependencies.stepper-driver]
 git = "https://github.com/etrombly/stepper-driver"
 
+[[bin]]
+name = "sandbox"
+test = false
+bench = false
+
 [profile.release]
 debug = true
 lto = true
 codegen-units = 1
-opt-level = "z"

@@ -1,15 +1,18 @@
 //! zen garden sandbox
-
+//! Codes currently supported
+//! G0/G1 linear movement
+//! G2/G3 arc movement
+//! G28 home (currently homes X and Y always)
+//! M0 emergency stop (also clears move buffer)
+//! 
+//! only uses absolute positioning for now
+ 
 //#![deny(unsafe_code)]
 //#![deny(warnings)]
 #![no_main]
 #![no_std]
 
 extern crate panic_abort;
-
-// debugging
-// use core::fmt::Write;
-// use cortex_m_semihosting::hio;
 
 use gcode::Mnemonic;
 use nb::block;
@@ -50,14 +53,15 @@ const MAX_FREQ_Y: u32 = (MAX_SPEED / Y_STEP_SIZE) as u32;
 // Length of linear segment for arcs
 const MM_PER_ARC_SEGMENT: f32 = 1.0;
 
-// max characters allowed in a line of gcode
+// Size of buffer for received serial data
+// max length of gcode line is supposed to be 256 and we need to hold a min of 2 lines
+// TODO: should probably increase this since utf-8 is not 1 byte per character, seems to be working well though
 const RX_SZ: usize = 512;
 
 // number of moves to buffer
-//const MOVE_SZ: usize = 256;
+// TODO: tweak this after testing with real patterns
 const MOVE_SZ: usize = 100;
 
-// TODO: put the structs in a lib
 // Movebuffer holds all movements parsed from gcode
 // modified from heapless ringbuffer
 pub struct MoveBuffer {
@@ -198,6 +202,7 @@ pub struct LinearMove {
     pub y: Option<f32>,
 }
 
+// new is const so you can make static LinearMove variables
 impl LinearMove {
     pub const fn new() -> LinearMove {
         LinearMove { x: None, y: None }
@@ -343,7 +348,7 @@ const APP: () = {
     static mut TIMER_Y: Timer<stm32f1::stm32f103::TIM3> = ();
     static mut TX: TX = ();
     static mut RX: RX = ();
-    // need to pass external interrupt register so the pending bit can be cleared in the handler
+    // need to pass external interrupt register so the pending bit can be cleared in the handlers
     static mut EXTI: stm32f1::stm32f103::EXTI = ();
     static mut SLEEP: u32 = 0;
 
@@ -356,6 +361,7 @@ const APP: () = {
         let exti = device.EXTI;
 
         // TODO: test performance and see what this needs to actually be set to
+        // set the system clock to max for this chip
         let clocks = rcc
             .cfgr
             .sysclk(64.mhz())
@@ -364,17 +370,18 @@ const APP: () = {
 
         // These timers are used to control the step speed of the steppers
         // the initial update freq doesn't matter since they won't start until a move is received
-        // just don't set to 0hz
+        // just don't set to 0hz or you get a divide by zero error
         let tim2 = Timer::tim2(device.TIM2, 1.hz(), clocks, &mut rcc.apb1);
         let tim3 = Timer::tim3(device.TIM3, 1.hz(), clocks, &mut rcc.apb1);
 
         let mut gpioa = device.GPIOA.split(&mut rcc.apb2);
         let mut gpiob = device.GPIOB.split(&mut rcc.apb2);
 
+        // configure PB0 and PB1 for limit switches on X and Y axis
         gpiob.pb0.into_pull_up_input(&mut gpiob.crl);
-        gpiob.pb1.into_pull_down_input(&mut gpiob.crl);
+        gpiob.pb1.into_pull_up_input(&mut gpiob.crl);
 
-        // configure interrupts, PB0 to EXTI0, PB1 to EXTI1
+        // configure interrupts, PB0 to EXTI0, PB1 to EXTI1 for limit switches
         // enable interrupt mask for line 0 and 1
         exti.imr.write(|w| {
             w.mr0().set_bit();
@@ -387,13 +394,14 @@ const APP: () = {
             w.tr1().set_bit()
         });
 
-        // set exti0 and 1 to PC
+        // set exti0 and 1 to gpio bank B
+        // TODO: submit patch to stm32f1 crate to make this call safe
         afio.exticr1.exticr1().write(|w| unsafe {
             w.exti0().bits(1);
             w.exti1().bits(1)
         });
 
-        // SERIAL
+        // SERIAL pins for USART 1
         let pa9 = gpioa.pa9.into_alternate_push_pull(&mut gpioa.crh);
         let pa10 = gpioa.pa10;
 
@@ -432,11 +440,19 @@ const APP: () = {
             block!(tx.write(*c)).ok();
         }
 
+        // schedule tasks to process gcode and send out performance data
         // TODO: tweak how often this runs
         schedule
             .process(Instant::now() + 1_000_000.cycles())
             .unwrap();
         schedule.perf(Instant::now() + 64_000_000.cycles()).unwrap();
+
+        // pend all used interrupts
+        rtfm::pend(Interrupt::USART1);
+        rtfm::pend(Interrupt::EXTI0);
+        rtfm::pend(Interrupt::EXTI1);
+        rtfm::pend(Interrupt::TIM2);
+        rtfm::pend(Interrupt::TIM3);
 
         init::LateResources {
             STEPPER_X: stepper_x,
@@ -451,14 +467,12 @@ const APP: () = {
 
     #[idle(resources = [SLEEP])]
     fn idle() -> ! {
-        rtfm::pend(Interrupt::USART1);
-        rtfm::pend(Interrupt::EXTI0);
-        rtfm::pend(Interrupt::EXTI1);
-        rtfm::pend(Interrupt::TIM2);
-        rtfm::pend(Interrupt::TIM3);
         loop {
+            // record when this loop starts
             let before = Instant::now();
+            // wait for an interrupt (sleep)
             wfi();
+            // after interrupt is fired add sleep time to the sleep tracker
             resources
                 .SLEEP
                 .lock(|sleep| *sleep += before.elapsed().as_cycles());
@@ -468,14 +482,13 @@ const APP: () = {
     #[task(schedule = [process], resources = [CURRENT, RX_BUF, CMD_BUF, MOVE_BUFFER, LOCATION, VIRT_LOCATION, SLEEP, STEPPER_X, STEPPER_Y, TX, TIMER_X, TIMER_Y])]
     fn process() {
         // check if any commands have been received, if so process the gcode
-        // TODO: this currently isn't fast enough to keep up if batches of commands are sent
         if let Some(data) = resources.RX_BUF.lock(Buffer::read) {
             // add the data to the command buffer
             for c in &data.buffer[0..data.index] {
                 // TODO: handle error here
                 if resources.CMD_BUF.push(*c).is_err() {}
             }
-            // if any lines have been received, process them
+            // if any complete lines have been received, process them
             while let Some((line, buffer)) = resources.CMD_BUF.split() {
                 *resources.CMD_BUF = buffer;
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
@@ -598,12 +611,11 @@ const APP: () = {
                     }
                     // if there isn't a move disable the stepper
                     None => {
-                        resources.CURRENT.x = None;
                         resources.TIMER_X.unlisten(Event::Update);
                     }
                 }
                 match new_move.y {
-                    // if there's an y movement set the direction and make the movement positive
+                    // if there's a y movement set the direction and make the movement positive
                     Some(y) => {
                         let next = y - resources.LOCATION.y;
                         if next > 0.0 {
@@ -616,7 +628,6 @@ const APP: () = {
                     }
                     // if there isn't a move disable the stepper
                     None => {
-                        resources.CURRENT.y = None;
                         resources.TIMER_Y.unlisten(Event::Update);
                     }
                 }
@@ -654,8 +665,6 @@ const APP: () = {
     #[task(schedule = [perf], resources = [SLEEP, TX, LOCATION])]
     fn perf() {
         // send performance info once a second
-        // TODO: figure out a good interval, 1 second may be too long to be useful
-        // write the cpu monitoring data out
         let mut data = [0; 12];
         let mut buf: [u8; 13] = [0; 13];
         LE::write_u32(&mut data[0..4], *resources.SLEEP);
@@ -669,6 +678,7 @@ const APP: () = {
         schedule.perf(scheduled + 64_000_000.cycles()).unwrap();
     }
 
+    // Timer to handle X stepper movement, speed is set in the process software task
     #[interrupt(resources=[CURRENT,LOCATION, STEPPER_X, TIMER_X, TX])]
     fn TIM2() {
         if let Some(x) = resources.CURRENT.x {
@@ -691,6 +701,7 @@ const APP: () = {
         }
     }
 
+    // Timer to handle Y stepper movement, speed is set in the process software task
     #[interrupt(resources=[CURRENT,LOCATION, STEPPER_Y, TIMER_Y])]
     fn TIM3() {
         if let Some(y) = resources.CURRENT.y {
@@ -713,9 +724,10 @@ const APP: () = {
         }
     }
 
+    // Interrupt handler for serial receive, needs to be high priority or the receive buffer overruns
     #[interrupt(priority = 2, resources=[RX,RX_BUF,TX])]
     fn USART1() {
-        // Read each character from serial as it comes in
+        // Read each character from serial as it comes in and add it to the rx buffer
         match resources.RX.read() {
             Ok(c) => {
                 // TODO: handle buffer being full
@@ -746,22 +758,29 @@ const APP: () = {
         }
     }
 
+    // X axis limit switch interrupt handler
     #[interrupt(resources=[EXTI, LOCATION, VIRT_LOCATION, CURRENT])]
     fn EXTI0() {
         resources.CURRENT.x = None;
         resources.LOCATION.x = 0.0;
         resources.VIRT_LOCATION.x = 0.0;
+        // clear the interrupt pending bit or the interrupt will keep firing
+        // TODO: see if there's a way to clear this without having an instance of the EXTI registers
+        // reference https://github.com/rust-embedded/cortex-m/pull/138
         resources.EXTI.pr.write(|w| w.pr0().set_bit());
     }
 
+    // Y axis limit switch interrupt handler
     #[interrupt(resources=[EXTI, LOCATION, VIRT_LOCATION, CURRENT])]
     fn EXTI1() {
         resources.CURRENT.y = None;
         resources.LOCATION.y = 0.0;
         resources.VIRT_LOCATION.y = 0.0;
+        // clear the interrupt pending bit or the interrupt will keep firing
         resources.EXTI.pr.write(|w| w.pr1().set_bit());
     }
 
+    // spare interrupt used for scheduling software tasks
     extern "C" {
         fn USART2();
     }

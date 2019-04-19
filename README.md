@@ -4,15 +4,15 @@ A zen garden sandbox. Will take a gcode drawing and sketch it in the sand.
 
 Can parse:
 
- G0, G1 (linear move)
+ G0, G1 (Linear move)
 
  G2, G3 (Arc move)
+
+ G28 (Home)
  
- M0 (emergency stop)  
+ M0 (Emergency stop)  
 
 Todo:
-
-  Homing
   
   Save settings
   
