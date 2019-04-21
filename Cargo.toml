@@ -28,7 +28,7 @@ features = ["stm32f103", "rt"]
 [dependencies.cortex-m-rtfm]
 version = "0.4.2"
 # disabled nightly feature because maybeuninit syntax changed, waiting for patch
-#features = ["nightly"]
+#features = ["nightly", "timer-queue"]
 features = ["timer-queue"]
 
 [dependencies.byteorder]
@@ -40,9 +40,8 @@ default-features = false
 version = "0.1.4"
 
 [dependencies.gcode]
-# using local copy until https://github.com/Michael-F-Bryan/gcode-rs/issues/35 is resolved
-#git = "https://github.com/Michael-F-Bryan/gcode-rs"
-path = "../gcode-rs/gcode"
+git = "https://github.com/Michael-F-Bryan/gcode-rs"
+default-features = false
 
 [dependencies.stepper-driver]
 git = "https://github.com/etrombly/stepper-driver"
