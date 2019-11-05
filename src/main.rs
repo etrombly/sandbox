@@ -4,21 +4,24 @@
 //! G2/G3 arc movement
 //! G28 home (currently homes X and Y always)
 //! M0 emergency stop (also clears move buffer)
-//! 
+//!
 //! only uses absolute positioning for now
- 
+
 //#![deny(unsafe_code)]
 //#![deny(warnings)]
 #![no_main]
 #![no_std]
+#![feature(core_intrinsics)]
 
 extern crate panic_abort;
 
+use core::intrinsics::powif32;
 use gcode::Mnemonic;
 use nb::block;
 use rtfm::{app, Instant};
 // atan2 and sqrt
-use libm::F32Ext;
+//use libm::F32Ext;
+use micromath::F32Ext;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
 use stm32f1::stm32f103::Interrupt;
@@ -62,6 +65,10 @@ const RX_SZ: usize = 512;
 // number of moves to buffer
 // TODO: tweak this after testing with real patterns
 const MOVE_SZ: usize = 100;
+
+fn sqr(x: f32) -> f32 {
+    unsafe { powif32(x, 2) }
+}
 
 // Movebuffer holds all movements parsed from gcode
 // modified from heapless ringbuffer
@@ -245,7 +252,7 @@ impl ArcMove {
     ) -> ArcMove {
         let center_x = curr_x + i;
         let center_y = curr_y + j;
-        let radius = ((curr_x - center_x).powf(2.0) + (curr_y - center_y).powf(2.0)).sqrt();
+        let radius = (sqr(curr_x - center_x) + sqr(curr_y - center_y)).sqrt();
         let r_x = -i;
         let r_y = -j;
         let rt_x = end_x - center_x;
@@ -270,7 +277,7 @@ impl ArcMove {
 
         let segments = (mm_of_travel / MM_PER_ARC_SEGMENT).floor();
         let sin_t = angular_travel / segments;
-        let cos_t = 1.0 - 0.5 * (sin_t).powf(2.0); // Small angle approximation
+        let cos_t = 1.0 - 0.5 * sqr(sin_t); // Small angle approximation
 
         ArcMove {
             end_x,
