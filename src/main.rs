@@ -29,9 +29,10 @@ use stm32f1xx_hal::{
         Output, PushPull,
     },
     prelude::*,
-    serial::{Rx, Serial, Tx},
+    serial::{Rx, Serial, Tx, Config},
     timer::{Event, Timer},
 };
+use void::Void;
 
 // used for encoding data to send over serial
 use byteorder::{ByteOrder, LE};
@@ -319,6 +320,7 @@ type STEPPER_X = Stepper<
     PA3<Output<PushPull>>,
     PA4<Output<PushPull>>,
     ULN2003,
+    Void,
 >;
 
 // the second stepper is connected to a ULN2003 on pins PB5-8
@@ -329,6 +331,7 @@ type STEPPER_Y = Stepper<
     PB7<Output<PushPull>>,
     PB8<Output<PushPull>>,
     ULN2003,
+    Void,
 >;
 
 #[app(device = stm32f1::stm32f103)]
@@ -409,7 +412,7 @@ const APP: () = {
             device.USART1,
             (pa9, pa10),
             &mut afio.mapr,
-            9_600.bps(),
+            Config { baudrate: 9_600.bps(), ..Default::default()},
             clocks,
             &mut rcc.apb2,
         );
