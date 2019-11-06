@@ -46,7 +46,8 @@ version = "1.0.2"
 
 [dependencies.gcode]
 # using local copy until https://github.com/Michael-F-Bryan/gcode-rs/issues/35 is resolved
-#git = "https://github.com/Michael-F-Bryan/gcode-rs"
+# git = "https://github.com/Michael-F-Bryan/gcode-rs"
+default-features = false
 path = "../gcode-rs/gcode"
 
 [dependencies.stepper-driver]

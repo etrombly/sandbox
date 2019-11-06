@@ -32,7 +32,7 @@ use stm32f1xx_hal::{
         Output, PushPull,
     },
     prelude::*,
-    serial::{Rx, Serial, Tx, Config},
+    serial::{Config, Rx, Serial, Tx},
     timer::{Event, Timer},
 };
 use void::Void;
@@ -419,7 +419,10 @@ const APP: () = {
             device.USART1,
             (pa9, pa10),
             &mut afio.mapr,
-            Config { baudrate: 9_600.bps(), ..Default::default()},
+            Config {
+                baudrate: 9_600.bps(),
+                ..Default::default()
+            },
             clocks,
             &mut rcc.apb2,
         );
@@ -502,101 +505,105 @@ const APP: () = {
             while let Some((line, buffer)) = resources.CMD_BUF.split() {
                 *resources.CMD_BUF = buffer;
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
-                    for line in gcode::parse(gcode) {
-                        match line.mnemonic() {
-                            Mnemonic::General => {
-                                match line.major_number() {
-                                    0 | 1 => {
-                                        // TODO: Handle the buffer being full
-                                        if resources
-                                            .MOVE_BUFFER
-                                            .push(&Movement::LinearMove(LinearMove {
-                                                x: line.value_for('x'),
-                                                y: line.value_for('y'),
-                                            }))
-                                            .is_err()
-                                        {
-                                        } else {
-                                            let x = if let Some(x) = line.value_for('x') {
-                                                x
+                    for lines in gcode::parse(gcode) {
+                        for line in lines.gcodes() {
+                            match line.mnemonic() {
+                                Mnemonic::General => {
+                                    match line.major_number() {
+                                        0 | 1 => {
+                                            // TODO: Handle the buffer being full
+                                            if resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::LinearMove(LinearMove {
+                                                    x: line.value_for('x'),
+                                                    y: line.value_for('y'),
+                                                }))
+                                                .is_err()
+                                            {
                                             } else {
-                                                resources.VIRT_LOCATION.x
-                                            };
-                                            let y = if let Some(y) = line.value_for('y') {
-                                                y
-                                            } else {
-                                                resources.VIRT_LOCATION.y
-                                            };
-                                            *resources.VIRT_LOCATION = Point { x, y };
+                                                let x = if let Some(x) = line.value_for('x') {
+                                                    x
+                                                } else {
+                                                    resources.VIRT_LOCATION.x
+                                                };
+                                                let y = if let Some(y) = line.value_for('y') {
+                                                    y
+                                                } else {
+                                                    resources.VIRT_LOCATION.y
+                                                };
+                                                *resources.VIRT_LOCATION = Point { x, y };
+                                            }
                                         }
-                                    }
-                                    // TODO: if path planning is going to be added arcs should be converted in to linear moves here
-                                    2 => {
-                                        if resources
-                                            .MOVE_BUFFER
-                                            .push(&Movement::ArcMove(ArcMove::new(
-                                                resources.VIRT_LOCATION.x,
-                                                resources.VIRT_LOCATION.y,
-                                                line.value_for('x').unwrap(),
-                                                line.value_for('y').unwrap(),
-                                                line.value_for('i').unwrap(),
-                                                line.value_for('j').unwrap(),
-                                                ArcDirection::CW,
-                                            )))
-                                            .is_err()
-                                        {
-                                        } else {
-                                            let x = if let Some(x) = line.value_for('x') {
-                                                x
+                                        // TODO: if path planning is going to be added arcs should be converted in to linear moves here
+                                        2 => {
+                                            if resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::ArcMove(ArcMove::new(
+                                                    resources.VIRT_LOCATION.x,
+                                                    resources.VIRT_LOCATION.y,
+                                                    line.value_for('x').unwrap(),
+                                                    line.value_for('y').unwrap(),
+                                                    line.value_for('i').unwrap(),
+                                                    line.value_for('j').unwrap(),
+                                                    ArcDirection::CW,
+                                                )))
+                                                .is_err()
+                                            {
                                             } else {
-                                                resources.VIRT_LOCATION.x
-                                            };
-                                            let y = if let Some(y) = line.value_for('y') {
-                                                y
-                                            } else {
-                                                resources.VIRT_LOCATION.y
-                                            };
-                                            *resources.VIRT_LOCATION = Point { x, y };
+                                                let x = if let Some(x) = line.value_for('x') {
+                                                    x
+                                                } else {
+                                                    resources.VIRT_LOCATION.x
+                                                };
+                                                let y = if let Some(y) = line.value_for('y') {
+                                                    y
+                                                } else {
+                                                    resources.VIRT_LOCATION.y
+                                                };
+                                                *resources.VIRT_LOCATION = Point { x, y };
+                                            }
                                         }
+                                        3 => {
+                                            if resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::ArcMove(ArcMove::new(
+                                                    resources.LOCATION.x,
+                                                    resources.LOCATION.y,
+                                                    line.value_for('x').unwrap(),
+                                                    line.value_for('y').unwrap(),
+                                                    line.value_for('i').unwrap(),
+                                                    line.value_for('j').unwrap(),
+                                                    ArcDirection::CCW,
+                                                )))
+                                                .is_err()
+                                            {
+                                            }
+                                        }
+                                        28 => {
+                                            // TODO: add support for homing x or y individually
+                                            if resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::LinearMove(LinearMove {
+                                                    x: Some(-100_000.0),
+                                                    y: Some(-100_000.0),
+                                                }))
+                                                .is_err()
+                                            {
+                                            }
+                                        }
+                                        _ => {}
                                     }
-                                    3 => {
-                                        if resources
-                                            .MOVE_BUFFER
-                                            .push(&Movement::ArcMove(ArcMove::new(
-                                                resources.LOCATION.x,
-                                                resources.LOCATION.y,
-                                                line.value_for('x').unwrap(),
-                                                line.value_for('y').unwrap(),
-                                                line.value_for('i').unwrap(),
-                                                line.value_for('j').unwrap(),
-                                                ArcDirection::CCW,
-                                            )))
-                                            .is_err()
-                                        {}
-                                    }
-                                    28 => {
-                                        // TODO: add support for homing x or y individually
-                                        if resources
-                                            .MOVE_BUFFER
-                                            .push(&Movement::LinearMove(LinearMove {
-                                                x: Some(-100_000.0),
-                                                y: Some(-100_000.0),
-                                            }))
-                                            .is_err()
-                                        {}
+                                }
+                                Mnemonic::Miscellaneous => match line.major_number() {
+                                    0 => {
+                                        resources.MOVE_BUFFER.clear();
+                                        resources.CURRENT.x = None;
+                                        resources.CURRENT.y = None;
                                     }
                                     _ => {}
-                                }
-                            }
-                            Mnemonic::Miscellaneous => match line.major_number() {
-                                0 => {
-                                    resources.MOVE_BUFFER.clear();
-                                    resources.CURRENT.x = None;
-                                    resources.CURRENT.y = None;
-                                }
+                                },
                                 _ => {}
-                            },
-                            _ => {}
+                            }
                         }
                     }
                 }
