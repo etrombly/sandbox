@@ -18,9 +18,11 @@ extern crate panic_abort;
 use core::intrinsics::powif32;
 use gcode::Mnemonic;
 use nb::block;
-use rtfm::{app, cyccnt::{Instant, U32Ext}};
+use rtfm::{
+    app,
+    cyccnt::{Instant, U32Ext},
+};
 // atan2 and sqrt
-//use libm::F32Ext;
 use micromath::F32Ext;
 use rtfm::export::wfi;
 use stepper_driver::{ic::ULN2003, Direction, Stepper};
@@ -33,7 +35,7 @@ use stm32f1xx_hal::{
     },
     prelude::*,
     serial::{Config, Rx, Serial, Tx},
-    timer::{Event, CountDownTimer, Timer},
+    timer::{CountDownTimer, Event, Timer},
 };
 
 // used for encoding data to send over serial
@@ -462,7 +464,9 @@ const APP: () = {
         cx.schedule
             .process(Instant::now() + 1_000_000.cycles())
             .unwrap();
-        cx.schedule.perf(Instant::now() + 64_000_000.cycles()).unwrap();
+        cx.schedule
+            .perf(Instant::now() + 64_000_000.cycles())
+            .unwrap();
 
         // pend all used interrupts
         rtfm::pend(Interrupt::USART1);
@@ -516,7 +520,8 @@ const APP: () = {
                                     match line.major_number() {
                                         0 | 1 => {
                                             // TODO: Handle the buffer being full
-                                            if cx.resources
+                                            if cx
+                                                .resources
                                                 .MOVE_BUFFER
                                                 .push(&Movement::LinearMove(LinearMove {
                                                     x: line.value_for('x'),
@@ -540,7 +545,8 @@ const APP: () = {
                                         }
                                         // TODO: if path planning is going to be added arcs should be converted in to linear moves here
                                         2 => {
-                                            if cx.resources
+                                            if cx
+                                                .resources
                                                 .MOVE_BUFFER
                                                 .push(&Movement::ArcMove(ArcMove::new(
                                                     cx.resources.VIRT_LOCATION.x,
@@ -568,7 +574,8 @@ const APP: () = {
                                             }
                                         }
                                         3 => {
-                                            if cx.resources
+                                            if cx
+                                                .resources
                                                 .MOVE_BUFFER
                                                 .push(&Movement::ArcMove(ArcMove::new(
                                                     cx.resources.LOCATION.x,
@@ -585,7 +592,8 @@ const APP: () = {
                                         }
                                         28 => {
                                             // TODO: add support for homing x or y individually
-                                            if cx.resources
+                                            if cx
+                                                .resources
                                                 .MOVE_BUFFER
                                                 .push(&Movement::LinearMove(LinearMove {
                                                     x: Some(-100_000.0),
@@ -680,7 +688,9 @@ const APP: () = {
             }
         }
         // TODO: tweak how often this runs
-        cx.schedule.process(cx.scheduled + 1_000_000.cycles()).unwrap();
+        cx.schedule
+            .process(cx.scheduled + 1_000_000.cycles())
+            .unwrap();
     }
 
     #[task(schedule = [perf], resources = [SLEEP, TX, LOCATION])]
@@ -696,7 +706,9 @@ const APP: () = {
         for byte in &buf {
             cx.resources.TX.lock(|tx| block!(tx.write(*byte)).ok());
         }
-        cx.schedule.perf(cx.scheduled + 64_000_000.cycles()).unwrap();
+        cx.schedule
+            .perf(cx.scheduled + 64_000_000.cycles())
+            .unwrap();
     }
 
     // Timer to handle X stepper movement, speed is set in the process software task
@@ -704,7 +716,7 @@ const APP: () = {
     fn TIM2(cx: TIM2::Context) {
         if let Some(x) = cx.resources.CURRENT.x {
             if x > 0.0 {
-                cx.resources.STEPPER_X.step();
+                cx.resources.STEPPER_X.step().unwrap();
                 cx.resources.CURRENT.x = Some(x - X_STEP_SIZE);
                 match cx.resources.STEPPER_X.direction {
                     Direction::CW => cx.resources.LOCATION.x += X_STEP_SIZE,
@@ -714,7 +726,7 @@ const APP: () = {
                 cx.resources.CURRENT.x = None;
             }
         } else {
-            cx.resources.STEPPER_X.disable();
+            cx.resources.STEPPER_X.disable().unwrap();
         }
 
         if cx.resources.TIMER_X.wait().is_err() {
@@ -727,7 +739,7 @@ const APP: () = {
     fn TIM3(cx: TIM3::Context) {
         if let Some(y) = cx.resources.CURRENT.y {
             if y > 0.0 {
-                cx.resources.STEPPER_Y.step();
+                cx.resources.STEPPER_Y.step().unwrap();
                 cx.resources.CURRENT.y = Some(y - Y_STEP_SIZE);
                 match cx.resources.STEPPER_Y.direction {
                     Direction::CW => cx.resources.LOCATION.y += Y_STEP_SIZE,
@@ -737,7 +749,7 @@ const APP: () = {
                 cx.resources.CURRENT.y = None;
             }
         } else {
-            cx.resources.STEPPER_Y.disable();
+            cx.resources.STEPPER_Y.disable().unwrap();
         }
 
         if cx.resources.TIMER_Y.wait().is_err() {
