@@ -18,7 +18,7 @@ extern crate panic_abort;
 use core::intrinsics::powif32;
 use gcode::Mnemonic;
 use nb::block;
-use rtfm::{app, cyccnt::{Instant, Duration, U32Ext}};
+use rtfm::{app, cyccnt::{Instant, U32Ext}};
 // atan2 and sqrt
 //use libm::F32Ext;
 use micromath::F32Ext;
