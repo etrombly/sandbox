@@ -10,20 +10,20 @@ repository = "https://github.com/etrombly/sandbox"
 edition = "2018"
 
 [dependencies]
-cortex-m = "0.6.3"
+cortex-m = "0.6.4"
 nb = "1.0.0"
 cortex-m-semihosting = "0.3.5"
-cortex-m-rt = "0.6.12"
+cortex-m-rt = "0.6.13"
 panic-abort = "0.3.2"
-micromath = "1.0.1"
-cortex-m-rtic = "0.5.3"
+micromath = "1.1.0"
+cortex-m-rtic = "0.5.5"
 
 [dependencies.stm32f1]
 version = "0.11.0"
 features = ["stm32f103", "rt"]
 
 [dependencies.stm32f1xx-hal]
-version = "0.6.1"
+version = "0.7.0"
 features = ["stm32f103", "rt"]
 
 [dependencies.byteorder]

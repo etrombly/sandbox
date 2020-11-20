@@ -16,7 +16,7 @@
 extern crate panic_abort;
 
 use core::intrinsics::powif32;
-use gcode::{Mnemonic, Parser, Nop, buffers::DefaultBuffers};
+use gcode::{buffers::DefaultBuffers, Mnemonic, Nop, Parser};
 use nb::block;
 use rtic::{
     app,
@@ -317,8 +317,8 @@ pub enum Movement {
 
 // CONNECTIONS
 // serial tx and rx
-type TX = Tx<stm32f1::stm32f103::USART1>;
-type RX = Rx<stm32f1::stm32f103::USART1>;
+type TX = Tx<stm32f1xx_hal::pac::USART1>;
+type RX = Rx<stm32f1xx_hal::pac::USART1>;
 
 // the first stepper is connected to a ULN2003 on pins PA1-4
 #[allow(non_camel_case_types)]
@@ -342,7 +342,7 @@ type STEPPER_Y = Stepper<
     core::convert::Infallible,
 >;
 
-#[app(device = stm32f1::stm32f103, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
+#[app(device = stm32f1xx_hal::pac, peripherals = true, monotonic = rtic::cyccnt::CYCCNT)]
 const APP: () = {
     struct Resources {
         #[init(LinearMove::new())]
@@ -359,18 +359,18 @@ const APP: () = {
         VIRT_LOCATION: Point,
         STEPPER_X: STEPPER_X,
         STEPPER_Y: STEPPER_Y,
-        TIMER_X: CountDownTimer<stm32f1::stm32f103::TIM2>,
-        TIMER_Y: CountDownTimer<stm32f1::stm32f103::TIM3>,
+        TIMER_X: CountDownTimer<stm32f1xx_hal::pac::TIM2>,
+        TIMER_Y: CountDownTimer<stm32f1xx_hal::pac::TIM3>,
         TX: TX,
         RX: RX,
-        EXTI: stm32f1::stm32f103::EXTI,
+        EXTI: stm32f1xx_hal::pac::EXTI,
         #[init(0)]
         SLEEP: u32,
     }
 
     #[init(schedule = [process, perf])]
     fn init(cx: init::Context) -> init::LateResources {
-        let device: stm32f1::stm32f103::Peripherals = cx.device;
+        let device = cx.device;
         let mut flash = device.FLASH.constrain();
         let mut rcc = device.RCC.constrain();
         let mut afio = device.AFIO.constrain(&mut rcc.apb2);
@@ -514,111 +514,111 @@ const APP: () = {
                 *cx.resources.CMD_BUF = buffer;
                 if let Ok(gcode) = str::from_utf8(&line.buffer[0..line.index]) {
                     let parser: Parser<Nop, DefaultBuffers> = Parser::new(gcode, Nop);
-                    for lines in parser{
+                    for lines in parser {
                         for line in lines.gcodes() {
-                                match line.mnemonic() {
-                                    Mnemonic::General => {
-                                        match line.major_number() {
-                                            0 | 1 => {
-                                                // TODO: Handle the buffer being full
-                                                if cx
-                                                    .resources
-                                                    .MOVE_BUFFER
-                                                    .push(&Movement::LinearMove(LinearMove {
-                                                        x: line.value_for('x'),
-                                                        y: line.value_for('y'),
-                                                    }))
-                                                    .is_err()
-                                                {
+                            match line.mnemonic() {
+                                Mnemonic::General => {
+                                    match line.major_number() {
+                                        0 | 1 => {
+                                            // TODO: Handle the buffer being full
+                                            if cx
+                                                .resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::LinearMove(LinearMove {
+                                                    x: line.value_for('x'),
+                                                    y: line.value_for('y'),
+                                                }))
+                                                .is_err()
+                                            {
+                                            } else {
+                                                let x = if let Some(x) = line.value_for('x') {
+                                                    x
                                                 } else {
-                                                    let x = if let Some(x) = line.value_for('x') {
-                                                        x
-                                                    } else {
-                                                        cx.resources.VIRT_LOCATION.x
-                                                    };
-                                                    let y = if let Some(y) = line.value_for('y') {
-                                                        y
-                                                    } else {
-                                                        cx.resources.VIRT_LOCATION.y
-                                                    };
-                                                    *cx.resources.VIRT_LOCATION = Point { x, y };
-                                                }
-                                            }
-                                            // TODO: if path planning is going to be added arcs should be converted in to linear moves here
-                                            2 => {
-                                                if cx
-                                                    .resources
-                                                    .MOVE_BUFFER
-                                                    .push(&Movement::ArcMove(ArcMove::new(
-                                                        cx.resources.VIRT_LOCATION.x,
-                                                        cx.resources.VIRT_LOCATION.y,
-                                                        line.value_for('x').unwrap(),
-                                                        line.value_for('y').unwrap(),
-                                                        line.value_for('i').unwrap(),
-                                                        line.value_for('j').unwrap(),
-                                                        ArcDirection::CW,
-                                                    )))
-                                                    .is_err()
-                                                {
+                                                    cx.resources.VIRT_LOCATION.x
+                                                };
+                                                let y = if let Some(y) = line.value_for('y') {
+                                                    y
                                                 } else {
-                                                    let x = if let Some(x) = line.value_for('x') {
-                                                        x
-                                                    } else {
-                                                        cx.resources.VIRT_LOCATION.x
-                                                    };
-                                                    let y = if let Some(y) = line.value_for('y') {
-                                                        y
-                                                    } else {
-                                                        cx.resources.VIRT_LOCATION.y
-                                                    };
-                                                    *cx.resources.VIRT_LOCATION = Point { x, y };
-                                                }
+                                                    cx.resources.VIRT_LOCATION.y
+                                                };
+                                                *cx.resources.VIRT_LOCATION = Point { x, y };
                                             }
-                                            3 => {
-                                                if cx
-                                                    .resources
-                                                    .MOVE_BUFFER
-                                                    .push(&Movement::ArcMove(ArcMove::new(
-                                                        cx.resources.LOCATION.x,
-                                                        cx.resources.LOCATION.y,
-                                                        line.value_for('x').unwrap(),
-                                                        line.value_for('y').unwrap(),
-                                                        line.value_for('i').unwrap(),
-                                                        line.value_for('j').unwrap(),
-                                                        ArcDirection::CCW,
-                                                    )))
-                                                    .is_err()
-                                                {
-                                                }
-                                            }
-                                            28 => {
-                                                // TODO: add support for homing x or y individually
-                                                if cx
-                                                    .resources
-                                                    .MOVE_BUFFER
-                                                    .push(&Movement::LinearMove(LinearMove {
-                                                        x: Some(-100_000.0),
-                                                        y: Some(-100_000.0),
-                                                    }))
-                                                    .is_err()
-                                                {
-                                                }
-                                            }
-                                            _ => {}
                                         }
-                                    }
-                                    Mnemonic::Miscellaneous => match line.major_number() {
-                                        0 => {
-                                            cx.resources.MOVE_BUFFER.clear();
-                                            cx.resources.CURRENT.x = None;
-                                            cx.resources.CURRENT.y = None;
+                                        // TODO: if path planning is going to be added arcs should be converted in to linear moves here
+                                        2 => {
+                                            if cx
+                                                .resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::ArcMove(ArcMove::new(
+                                                    cx.resources.VIRT_LOCATION.x,
+                                                    cx.resources.VIRT_LOCATION.y,
+                                                    line.value_for('x').unwrap(),
+                                                    line.value_for('y').unwrap(),
+                                                    line.value_for('i').unwrap(),
+                                                    line.value_for('j').unwrap(),
+                                                    ArcDirection::CW,
+                                                )))
+                                                .is_err()
+                                            {
+                                            } else {
+                                                let x = if let Some(x) = line.value_for('x') {
+                                                    x
+                                                } else {
+                                                    cx.resources.VIRT_LOCATION.x
+                                                };
+                                                let y = if let Some(y) = line.value_for('y') {
+                                                    y
+                                                } else {
+                                                    cx.resources.VIRT_LOCATION.y
+                                                };
+                                                *cx.resources.VIRT_LOCATION = Point { x, y };
+                                            }
+                                        }
+                                        3 => {
+                                            if cx
+                                                .resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::ArcMove(ArcMove::new(
+                                                    cx.resources.LOCATION.x,
+                                                    cx.resources.LOCATION.y,
+                                                    line.value_for('x').unwrap(),
+                                                    line.value_for('y').unwrap(),
+                                                    line.value_for('i').unwrap(),
+                                                    line.value_for('j').unwrap(),
+                                                    ArcDirection::CCW,
+                                                )))
+                                                .is_err()
+                                            {
+                                            }
+                                        }
+                                        28 => {
+                                            // TODO: add support for homing x or y individually
+                                            if cx
+                                                .resources
+                                                .MOVE_BUFFER
+                                                .push(&Movement::LinearMove(LinearMove {
+                                                    x: Some(-100_000.0),
+                                                    y: Some(-100_000.0),
+                                                }))
+                                                .is_err()
+                                            {
+                                            }
                                         }
                                         _ => {}
-                                    },
-                                    _ => {}
+                                    }
                                 }
+                                Mnemonic::Miscellaneous => match line.major_number() {
+                                    0 => {
+                                        cx.resources.MOVE_BUFFER.clear();
+                                        cx.resources.CURRENT.x = None;
+                                        cx.resources.CURRENT.y = None;
+                                    }
+                                    _ => {}
+                                },
+                                _ => {}
                             }
                         }
+                    }
                 }
             }
         }
